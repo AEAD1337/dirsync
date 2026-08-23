@@ -52,6 +52,16 @@ jobs:
         working-directory: frontend
       - name: Build
         run: cargo build --release --features gui
+      # Staged before the CLI-only build below, which reuses the same
+      # target/release/dirsync.exe path and would otherwise overwrite it.
+      - name: Stage GUI binary
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/release/dirsync.exe dist/
+      - name: Build CLI-only
+        run: cargo build --release --no-default-features
+      - name: Stage CLI-only binary
+        run: Copy-Item target/release/dirsync.exe dist/dirsync-cli.exe
       - name: Install cargo-cyclonedx
         run: irm https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.ps1 | iex
       # Runtime dependency graph for the shipped Windows binary. cargo-cyclonedx
@@ -66,11 +76,8 @@ jobs:
           --target x86_64-pc-windows-msvc
           --no-build-deps
           --override-filename sbom-x86_64-pc-windows-msvc
-      - name: Stage release files
-        run: |
-          New-Item -ItemType Directory -Path dist | Out-Null
-          Copy-Item target/release/dirsync.exe dist/
-          Copy-Item sbom-x86_64-pc-windows-msvc.json dist/
+      - name: Stage SBOM
+        run: Copy-Item sbom-x86_64-pc-windows-msvc.json dist/
       - uses: actions/upload-artifact@v7
         with:
           name: windows
@@ -106,6 +113,21 @@ jobs:
         run: cargo build --release --features gui --target x86_64-unknown-linux-musl
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      # Staged before the CLI-only build below, which reuses the same
+      # target/.../release/dirsync path and would otherwise overwrite it.
+      - name: Stage GUI binary
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/dirsync dist/
+      - name: Build CLI-only
+        if: github.event_name != 'pull_request'
+        run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      - name: Stage CLI-only binary
+        if: github.event_name != 'pull_request'
+        run: cp target/x86_64-unknown-linux-musl/release/dirsync dist/dirsync-cli
       - name: Install cargo-cyclonedx
         if: github.event_name != 'pull_request'
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.sh | sh
@@ -132,12 +154,9 @@ jobs:
           --output-format JSON
           --output-reproducible
           --output-file ../sbom-frontend.json
-      - name: Stage release files
+      - name: Stage SBOMs
         if: github.event_name != 'pull_request'
-        run: |
-          mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/dirsync dist/
-          cp sbom-x86_64-unknown-linux-musl.json sbom-frontend.json dist/
+        run: cp sbom-x86_64-unknown-linux-musl.json sbom-frontend.json dist/
       - uses: actions/upload-artifact@v7
         if: github.event_name != 'pull_request'
         with:
@@ -176,6 +195,8 @@ jobs:
               --notes "Latest automated build from main." \
               artifacts/dirsync.exe \
               artifacts/dirsync \
+              artifacts/dirsync-cli.exe \
+              artifacts/dirsync-cli \
               artifacts/sbom-x86_64-pc-windows-msvc.json \
               artifacts/sbom-x86_64-unknown-linux-musl.json \
               artifacts/sbom-frontend.json
