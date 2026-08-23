@@ -162,7 +162,7 @@ jobs:
         run: cp target/x86_64-unknown-linux-musl/release/dirsync dist/dirsync-cli
       - name: Install cargo-cyclonedx
         if: github.event_name != 'pull_request'
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.sh | sh
+        run: curl --proto '=https' --tlsv1.3 -LsSf https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.sh | sh
       # Runtime dependency graph for the shipped Linux/musl binary.
       - name: Generate Rust SBOM
         if: github.event_name != 'pull_request'
