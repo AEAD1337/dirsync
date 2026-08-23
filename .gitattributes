@@ -1,0 +1,22 @@
+# Line endings are pinned here so they do not depend on each developer's
+# global Git config. Git for Windows ships with core.autocrlf=true, which
+# checks text files out as CRLF and then warns on every `git add` that "LF
+# will be replaced by CRLF". Setting eol=lf explicitly overrides autocrlf for
+# this repository, so Windows, macOS, and the Linux/musl CI build all see
+# byte-identical files and the warning stops.
+* text=auto eol=lf
+
+# Called through a POSIX shell; CRLF would break the shebang line.
+*.sh text eol=lf
+# PowerShell reads LF fine on Windows, listed for symmetry with make.sh.
+*.ps1 text eol=lf
+
+# Never run EOL conversion or diff these as text.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.woff binary
+*.woff2 binary
+*.exe binary

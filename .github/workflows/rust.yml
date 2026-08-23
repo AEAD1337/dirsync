@@ -1,0 +1,181 @@
+name: Release
+
+# Changes that cannot alter either binary skip the whole workflow: including
+# the rolling release, which would otherwise be torn down and republished with
+# byte-identical artifacts. Docs are the obvious case; make.ps1 and make.sh
+# qualify too, because they are local developer helpers and CI never invokes
+# them (it calls cargo and npm directly). Only paths that can influence a build
+# belong outside this list; when in doubt, leave a path out of it and let CI run.
+#
+# The two lists are duplicated on purpose: GitHub's workflow parser does not
+# support YAML anchors, so they have to be kept in sync by hand.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "**/*.md"
+      - "doc/**"
+      - "reviews/**"
+      - "LICENSE"
+      - ".gitignore"
+      - "make.ps1"
+      - "make.sh"
+  pull_request:
+    branches: ["main"]
+    paths-ignore:
+      - "**/*.md"
+      - "doc/**"
+      - "reviews/**"
+      - "LICENSE"
+      - ".gitignore"
+      - "make.ps1"
+      - "make.sh"
+
+env:
+  CARGO_TERM_COLOR: always
+  # SBOM generators are pinned so the output stays reproducible; bump deliberately.
+  CARGO_CYCLONEDX_VERSION: "0.5.9"
+  CYCLONEDX_NPM_VERSION: "6.0.1"
+
+jobs:
+  build-windows:
+    if: github.event_name == 'push'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+      - name: Build
+        run: cargo build --release --features gui
+      - name: Install cargo-cyclonedx
+        run: irm https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.ps1 | iex
+      # Runtime dependency graph for the shipped Windows binary. cargo-cyclonedx
+      # resolves via `cargo metadata`, so dev-dependencies are excluded by
+      # construction and `--no-build-deps` drops build-dependencies too.
+      - name: Generate SBOM
+        run: >
+          cargo cyclonedx
+          --format json
+          --spec-version 1.5
+          --features gui
+          --target x86_64-pc-windows-msvc
+          --no-build-deps
+          --override-filename sbom-x86_64-pc-windows-msvc
+      - name: Stage release files
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/release/dirsync.exe dist/
+          Copy-Item sbom-x86_64-pc-windows-msvc.json dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist/
+
+  test-and-build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test
+        run: cargo test --all-features --verbose
+      - name: Clippy
+        run: cargo clippy --verbose
+      # Everything below only runs on push: a PR just needs the checks above.
+      - uses: actions/setup-node@v7
+        if: github.event_name == 'push'
+        with:
+          node-version: "24"
+      - name: Install frontend deps
+        if: github.event_name == 'push'
+        run: npm ci
+        working-directory: frontend
+      - name: Install musl tools
+        if: github.event_name == 'push'
+        run: sudo apt-get install -y musl-tools
+      - name: Add musl target
+        if: github.event_name == 'push'
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: Build
+        if: github.event_name == 'push'
+        run: cargo build --release --features gui --target x86_64-unknown-linux-musl
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      - name: Install cargo-cyclonedx
+        if: github.event_name == 'push'
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.sh | sh
+      # Runtime dependency graph for the shipped Linux/musl binary.
+      - name: Generate Rust SBOM
+        if: github.event_name == 'push'
+        run: >
+          cargo cyclonedx
+          --format json
+          --spec-version 1.5
+          --features gui
+          --target x86_64-unknown-linux-musl
+          --no-build-deps
+          --override-filename sbom-x86_64-unknown-linux-musl
+      # The frontend declares everything as devDependencies, but Vite compiles
+      # the Svelte runtime into the bundle that rust-embed ships inside the
+      # binary: so these are recorded rather than omitted.
+      - name: Generate frontend SBOM
+        if: github.event_name == 'push'
+        working-directory: frontend
+        run: >
+          npx --yes @cyclonedx/cyclonedx-npm@${{ env.CYCLONEDX_NPM_VERSION }}
+          --spec-version 1.6
+          --output-format JSON
+          --output-reproducible
+          --output-file ../sbom-frontend.json
+      - name: Stage release files
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/dirsync dist/
+          cp sbom-x86_64-unknown-linux-musl.json sbom-frontend.json dist/
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: linux
+          path: dist/
+
+  release:
+    needs: [build-windows, test-and-build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows
+          path: artifacts/
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux
+          path: artifacts/
+      - name: Publish rolling release
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 5
+          command: |
+            gh release delete rolling --yes || true
+            git push origin --delete rolling || true
+            git tag -f rolling
+            git push origin rolling --force
+            gh release create rolling \
+              --title "Rolling" \
+              --latest \
+              --notes "Latest automated build from main." \
+              artifacts/dirsync.exe \
+              artifacts/dirsync \
+              artifacts/sbom-x86_64-pc-windows-msvc.json \
+              artifacts/sbom-x86_64-unknown-linux-musl.json \
+              artifacts/sbom-frontend.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
