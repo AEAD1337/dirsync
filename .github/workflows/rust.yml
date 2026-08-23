@@ -76,8 +76,21 @@ jobs:
           --target x86_64-pc-windows-msvc
           --no-build-deps
           --override-filename sbom-x86_64-pc-windows-msvc
-      - name: Stage SBOM
-        run: Copy-Item sbom-x86_64-pc-windows-msvc.json dist/
+      # The CLI-only binary links 52 fewer crates (no axum, rust-embed,
+      # mime_guess or open), so the GUI SBOM would overstate it.
+      - name: Generate CLI-only SBOM
+        run: >
+          cargo cyclonedx
+          --format json
+          --spec-version 1.5
+          --no-default-features
+          --target x86_64-pc-windows-msvc
+          --no-build-deps
+          --override-filename sbom-cli-x86_64-pc-windows-msvc
+      - name: Stage SBOMs
+        run: |
+          Copy-Item sbom-x86_64-pc-windows-msvc.json dist/
+          Copy-Item sbom-cli-x86_64-pc-windows-msvc.json dist/
       - uses: actions/upload-artifact@v7
         with:
           name: windows
@@ -154,9 +167,24 @@ jobs:
           --output-format JSON
           --output-reproducible
           --output-file ../sbom-frontend.json
+      # The CLI-only binary links 52 fewer crates (no axum, rust-embed,
+      # mime_guess or open) and embeds no frontend, so neither the GUI
+      # SBOM nor sbom-frontend.json describes it.
+      - name: Generate CLI-only SBOM
+        if: github.event_name != 'pull_request'
+        run: >
+          cargo cyclonedx
+          --format json
+          --spec-version 1.5
+          --no-default-features
+          --target x86_64-unknown-linux-musl
+          --no-build-deps
+          --override-filename sbom-cli-x86_64-unknown-linux-musl
       - name: Stage SBOMs
         if: github.event_name != 'pull_request'
-        run: cp sbom-x86_64-unknown-linux-musl.json sbom-frontend.json dist/
+        run: |
+          cp sbom-x86_64-unknown-linux-musl.json sbom-frontend.json dist/
+          cp sbom-cli-x86_64-unknown-linux-musl.json dist/
       - uses: actions/upload-artifact@v7
         if: github.event_name != 'pull_request'
         with:
@@ -198,7 +226,9 @@ jobs:
               artifacts/dirsync-cli.exe \
               artifacts/dirsync-cli \
               artifacts/sbom-x86_64-pc-windows-msvc.json \
+              artifacts/sbom-cli-x86_64-pc-windows-msvc.json \
               artifacts/sbom-x86_64-unknown-linux-musl.json \
+              artifacts/sbom-cli-x86_64-unknown-linux-musl.json \
               artifacts/sbom-frontend.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
