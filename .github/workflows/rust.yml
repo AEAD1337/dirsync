@@ -40,7 +40,7 @@ env:
 
 jobs:
   build-windows:
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -84,32 +84,34 @@ jobs:
         run: cargo test --all-features --verbose
       - name: Clippy
         run: cargo clippy --verbose
-      # Everything below only runs on push: a PR just needs the checks above.
+      # Everything below is skipped for pull requests: a PR just needs the
+      # checks above. A manual workflow_dispatch run does build and release,
+      # which is the point of having the manual trigger at all.
       - uses: actions/setup-node@v7
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         with:
           node-version: "24"
       - name: Install frontend deps
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: npm ci
         working-directory: frontend
       - name: Install musl tools
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: sudo apt-get install -y musl-tools
       - name: Add musl target
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: rustup target add x86_64-unknown-linux-musl
       - name: Build
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: cargo build --release --features gui --target x86_64-unknown-linux-musl
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       - name: Install cargo-cyclonedx
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.sh | sh
       # Runtime dependency graph for the shipped Linux/musl binary.
       - name: Generate Rust SBOM
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: >
           cargo cyclonedx
           --format json
@@ -122,7 +124,7 @@ jobs:
       # the Svelte runtime into the bundle that rust-embed ships inside the
       # binary: so these are recorded rather than omitted.
       - name: Generate frontend SBOM
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         working-directory: frontend
         run: >
           npx --yes @cyclonedx/cyclonedx-npm@${{ env.CYCLONEDX_NPM_VERSION }}
@@ -131,13 +133,13 @@ jobs:
           --output-reproducible
           --output-file ../sbom-frontend.json
       - name: Stage release files
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p dist
           cp target/x86_64-unknown-linux-musl/release/dirsync dist/
           cp sbom-x86_64-unknown-linux-musl.json sbom-frontend.json dist/
       - uses: actions/upload-artifact@v7
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         with:
           name: linux
           path: dist/
