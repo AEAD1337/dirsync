@@ -152,5 +152,7 @@ CLI flags override config values for that run but do not write back to the file.
 
 ## License
 
+Copyright (c) 2026 AEAD1337
+
 GPL-3.0-only, see [LICENSE](LICENSE) for details.  
 Third-party dependency licenses are listed in **Help → Third-Party Licenses** in the GUI.
