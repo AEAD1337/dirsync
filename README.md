@@ -10,6 +10,17 @@ Mirrors a source directory into a destination directory: copying new files, over
 
 Available as both a CLI tool and a local web GUI. Runs on **Windows, macOS, and Linux**.
 
+### GUI
+<img width="773" height="410" alt="grafik" src="https://github.com/user-attachments/assets/2303793a-927c-4471-9fc6-0354422b7b87" />
+
+### CLI
+```
+.\dirsync.exe D:\dirsync\SRC\ D:\dirsync\DST\
+Drive detection: SRC=SSD, DST=SSD → parallel I/O
+copy=1 overwrite=0 move=2 delete=1 symlink=0 identical=1 touch=0 (24.0 KB to transfer)
+  [========================================] 100% Done
+```
+
 ## Features
 
 - **Smart rename/move detection**: files moved or renamed within DST are identified by content hash and renamed in-place rather than deleted and re-copied
