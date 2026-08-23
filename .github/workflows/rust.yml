@@ -40,7 +40,10 @@ env:
 
 jobs:
   build-windows:
-    if: github.event_name != 'pull_request'
+    # The compile checks (Build, Build CLI-only) run on every PR so a
+    # Windows-only #[cfg(windows)] regression cannot hide behind a
+    # Linux-only PR pipeline. SBOM generation, staging, and the artifact
+    # upload are release concerns and stay push/dispatch-only below.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -55,19 +58,23 @@ jobs:
       # Staged before the CLI-only build below, which reuses the same
       # target/release/dirsync.exe path and would otherwise overwrite it.
       - name: Stage GUI binary
+        if: github.event_name != 'pull_request'
         run: |
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item target/release/dirsync.exe dist/
       - name: Build CLI-only
         run: cargo build --release --no-default-features
       - name: Stage CLI-only binary
+        if: github.event_name != 'pull_request'
         run: Copy-Item target/release/dirsync.exe dist/dirsync-cli.exe
       - name: Install cargo-cyclonedx
+        if: github.event_name != 'pull_request'
         run: irm https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.ps1 | iex
       # Runtime dependency graph for the shipped Windows binary. cargo-cyclonedx
       # resolves via `cargo metadata`, so dev-dependencies are excluded by
       # construction and `--no-build-deps` drops build-dependencies too.
       - name: Generate SBOM
+        if: github.event_name != 'pull_request'
         run: >
           cargo cyclonedx
           --format json
@@ -79,6 +86,7 @@ jobs:
       # The CLI-only binary links 52 fewer crates (no axum, rust-embed,
       # mime_guess or open), so the GUI SBOM would overstate it.
       - name: Generate CLI-only SBOM
+        if: github.event_name != 'pull_request'
         run: >
           cargo cyclonedx
           --format json
@@ -88,10 +96,12 @@ jobs:
           --no-build-deps
           --override-filename sbom-cli-x86_64-pc-windows-msvc
       - name: Stage SBOMs
+        if: github.event_name != 'pull_request'
         run: |
           Copy-Item sbom-x86_64-pc-windows-msvc.json dist/
           Copy-Item sbom-cli-x86_64-pc-windows-msvc.json dist/
       - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
         with:
           name: windows
           path: dist/
@@ -100,17 +110,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Format check
+        run: cargo fmt -- --check
       - name: Test
         run: cargo test --all-features --verbose
       - name: Clippy
-        run: cargo clippy --verbose
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      # build.rs already ran npm ci and the Vite build during Test/Clippy
+      # above (cargo invokes it whenever the gui feature is active, and
+      # --all-features enables it), so node_modules and the generated
+      # license file already exist here.
+      - name: Type-check frontend
+        run: npm run check
+        working-directory: frontend
       # Everything below is skipped for pull requests: a PR just needs the
       # checks above. A manual workflow_dispatch run does build and release,
       # which is the point of having the manual trigger at all.
-      - uses: actions/setup-node@v7
-        if: github.event_name != 'pull_request'
-        with:
-          node-version: "24"
       - name: Install frontend deps
         if: github.event_name != 'pull_request'
         run: npm ci
@@ -193,6 +211,11 @@ jobs:
 
   release:
     needs: [build-windows, test-and-build-linux]
+    # build-windows and test-and-build-linux both now run their compile
+    # checks on pull requests too, so their success no longer implies a
+    # push/dispatch event: without this, a PR run would satisfy `needs` and
+    # this job would try to overwrite the rolling release before merge.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
