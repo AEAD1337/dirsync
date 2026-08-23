@@ -105,6 +105,7 @@ jobs:
         with:
           name: windows
           path: dist/
+          retention-days: 7
 
   test-and-build-linux:
     runs-on: ubuntu-latest
@@ -208,6 +209,7 @@ jobs:
         with:
           name: linux
           path: dist/
+          retention-days: 7
 
   release:
     needs: [build-windows, test-and-build-linux]
