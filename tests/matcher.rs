@@ -46,10 +46,10 @@ fn test_hash_failure_emits_warning() {
 
     let mut warnings: Vec<String> = vec![];
     while let Ok(ev) = rx.try_recv() {
-        if let ProgressEvent::LogEntry(entry) = ev {
-            if matches!(entry.level, LogLevel::Warning) {
-                warnings.push(entry.message);
-            }
+        if let ProgressEvent::LogEntry(entry) = ev
+            && matches!(entry.level, LogLevel::Warning)
+        {
+            warnings.push(entry.message);
         }
     }
 

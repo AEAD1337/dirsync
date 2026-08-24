@@ -213,12 +213,12 @@ pub fn match_trees(
             // No same-path DST file: hash SRC and same-size DST candidates only
             // when candidates exist. Zero-byte files are excluded: their hashes
             // are all identical and move detection is meaningless for them.
-            if src.size > 0 {
-                if let Some(candidates) = dst_by_size.get(&src.size) {
-                    needs_hash.src.insert((src.abs_path.clone(), src.size));
-                    for c in candidates {
-                        needs_hash.dst.insert((c.abs_path.clone(), c.size));
-                    }
+            if src.size > 0
+                && let Some(candidates) = dst_by_size.get(&src.size)
+            {
+                needs_hash.src.insert((src.abs_path.clone(), src.size));
+                for c in candidates {
+                    needs_hash.dst.insert((c.abs_path.clone(), c.size));
                 }
             }
         }
@@ -246,19 +246,19 @@ pub fn match_trees(
     let last_emit_ms = AtomicU64::new(0);
     let throttle_ms: u64 = 100;
 
-    if let Some((first_path, _)) = &first_to_hash {
-        if let Some(p) = &progress {
-            let name = first_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned());
-            p.emit(ProgressEvent::ScanProgress {
-                phase: ScanPhase::Hashing,
-                path: name,
-            });
-            // Seed the timestamp so the rayon loop throttles from this point.
-            let now_ms = hash_start.elapsed().as_millis() as u64;
-            last_emit_ms.store(now_ms, Ordering::Relaxed);
-        }
+    if let Some((first_path, _)) = &first_to_hash
+        && let Some(p) = &progress
+    {
+        let name = first_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        p.emit(ProgressEvent::ScanProgress {
+            phase: ScanPhase::Hashing,
+            path: name,
+        });
+        // Seed the timestamp so the rayon loop throttles from this point.
+        let now_ms = hash_start.elapsed().as_millis() as u64;
+        last_emit_ms.store(now_ms, Ordering::Relaxed);
     }
 
     let emit_progress = |path: &std::path::Path| {
@@ -433,21 +433,21 @@ pub fn match_trees(
             // Look up by hash directly: O(1) instead of scanning all
             // same-size candidates. `dst_by_hash` only contains DST files,
             // so a hit always means: same content, different path → Move.
-            if let Some(&src_hash) = hashes.get(&src.abs_path) {
-                if let Some(candidates) = dst_by_hash.get(&src_hash) {
-                    for candidate in candidates {
-                        let eff = effective_dst_path(&candidate.rel_path);
-                        if !dst_matched.contains(&eff) {
-                            dst_matched.insert(eff);
-                            matched.push(MatchedEntry {
-                                src: (*src).clone(),
-                                result: MatchResult::MovedFrom(candidate.rel_path.clone()),
-                                src_hash: Some(src_hash),
-                                case_renamed_from: None,
-                            });
-                            found_move = true;
-                            break;
-                        }
+            if let Some(&src_hash) = hashes.get(&src.abs_path)
+                && let Some(candidates) = dst_by_hash.get(&src_hash)
+            {
+                for candidate in candidates {
+                    let eff = effective_dst_path(&candidate.rel_path);
+                    if !dst_matched.contains(&eff) {
+                        dst_matched.insert(eff);
+                        matched.push(MatchedEntry {
+                            src: (*src).clone(),
+                            result: MatchResult::MovedFrom(candidate.rel_path.clone()),
+                            src_hash: Some(src_hash),
+                            case_renamed_from: None,
+                        });
+                        found_move = true;
+                        break;
                     }
                 }
             }

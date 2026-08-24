@@ -128,12 +128,12 @@ fn generate_licenses_ts(root: &Path, frontend: &Path) {
     // `version` becomes a comma-separated list; other fields taken from first occurrence.
     let mut merged: Vec<LicEntry> = Vec::new();
     for e in entries {
-        if let Some(last) = merged.last_mut() {
-            if last.name == e.name {
-                last.version.push_str(", ");
-                last.version.push_str(&e.version);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && last.name == e.name
+        {
+            last.version.push_str(", ");
+            last.version.push_str(&e.version);
+            continue;
         }
         merged.push(e);
     }
@@ -206,10 +206,10 @@ fn runtime_package_ids(json: &serde_json::Value) -> std::collections::HashSet<St
 
     if let Some(members) = json["workspace_members"].as_array() {
         for m in members {
-            if let Some(id) = m.as_str() {
-                if visited.insert(id.to_string()) {
-                    queue.push_back(id.to_string());
-                }
+            if let Some(id) = m.as_str()
+                && visited.insert(id.to_string())
+            {
+                queue.push_back(id.to_string());
             }
         }
     }
@@ -228,12 +228,11 @@ fn runtime_package_ids(json: &serde_json::Value) -> std::collections::HashSet<St
                     .as_array()
                     .map(|kinds| kinds.iter().any(|k| k["kind"].is_null()))
                     .unwrap_or(false);
-                if is_runtime {
-                    if let Some(pkg_id) = dep["pkg"].as_str() {
-                        if visited.insert(pkg_id.to_string()) {
-                            queue.push_back(pkg_id.to_string());
-                        }
-                    }
+                if is_runtime
+                    && let Some(pkg_id) = dep["pkg"].as_str()
+                    && visited.insert(pkg_id.to_string())
+                {
+                    queue.push_back(pkg_id.to_string());
                 }
             }
         }
@@ -489,10 +488,10 @@ fn extract_copyright_from_dir(dir: &Path) -> Option<String> {
     ];
     for &fname in &candidates {
         let path = dir.join(fname);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Some(c) = extract_copyright_line(&content) {
-                return Some(c);
-            }
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Some(c) = extract_copyright_line(&content)
+        {
+            return Some(c);
         }
     }
     None
@@ -691,10 +690,10 @@ fn sync_readme_version(root: &Path, cargo_version: &str) {
             format!("{new_first}\n{rest}")
         }
     };
-    if updated != content {
-        if let Err(e) = std::fs::write(&path, &updated) {
-            println!("cargo:warning=Could not update README.md: {e}");
-        }
+    if updated != content
+        && let Err(e) = std::fs::write(&path, &updated)
+    {
+        println!("cargo:warning=Could not update README.md: {e}");
     }
 }
 
@@ -754,10 +753,10 @@ fn sync_package_lock_version(frontend: &Path, cargo_version: &str) {
         .collect::<Vec<_>>()
         .join("\n")
         + if content.ends_with('\n') { "\n" } else { "" };
-    if updated != content {
-        if let Err(e) = std::fs::write(&path, &updated) {
-            println!("cargo:warning=Could not update frontend/package-lock.json: {e}");
-        }
+    if updated != content
+        && let Err(e) = std::fs::write(&path, &updated)
+    {
+        println!("cargo:warning=Could not update frontend/package-lock.json: {e}");
     }
 }
 
@@ -796,10 +795,10 @@ fn sync_npm_version(frontend: &Path, cargo_version: &str) {
         // Restore trailing newline if original had one
         + if content.ends_with('\n') { "\n" } else { "" };
 
-    if updated != content {
-        if let Err(e) = std::fs::write(&pkg_path, &updated) {
-            println!("cargo:warning=Could not update frontend/package.json version: {e}");
-        }
+    if updated != content
+        && let Err(e) = std::fs::write(&pkg_path, &updated)
+    {
+        println!("cargo:warning=Could not update frontend/package.json version: {e}");
     }
 }
 

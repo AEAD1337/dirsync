@@ -454,11 +454,11 @@ fn sort_file_moves(file_moves: Vec<SyncOp>) -> Vec<SyncOp> {
     let mut in_deg = vec![0u8; n];
     let mut succ: Vec<Option<usize>> = vec![None; n];
     for i in 0..n {
-        if let Some(&j) = from_index.get(&entries[i].1) {
-            if j != i {
-                in_deg[i] = 1;
-                succ[j] = Some(i);
-            }
+        if let Some(&j) = from_index.get(&entries[i].1)
+            && j != i
+        {
+            in_deg[i] = 1;
+            succ[j] = Some(i);
         }
     }
 
@@ -612,12 +612,12 @@ async fn execute_op(
                 // symlink is caught here. The occupant is always an orphan in
                 // this situation (SRC has a directory at this path), and the
                 // planner suppresses its Delete op because we clear it here.
-                if let Ok(meta) = path.symlink_metadata() {
-                    if !meta.file_type().is_dir() {
-                        // On Windows, directory symlinks require remove_dir; try both.
-                        if let Err(e) = fs::remove_file(&path) {
-                            fs::remove_dir(&path).map_err(|_| e)?;
-                        }
+                if let Ok(meta) = path.symlink_metadata()
+                    && !meta.file_type().is_dir()
+                {
+                    // On Windows, directory symlinks require remove_dir; try both.
+                    if let Err(e) = fs::remove_file(&path) {
+                        fs::remove_dir(&path).map_err(|_| e)?;
                     }
                 }
                 fs::create_dir_all(&path)?;
@@ -795,10 +795,10 @@ async fn do_copy_small(op: SyncOp, progress: &Arc<ProgressState>, dry_run: bool)
                     let _ = fs::remove_file(&tmp);
                 }
                 staged?;
-                if let Ok(meta) = fs::metadata(&src) {
-                    if let Ok(mtime) = meta.modified() {
-                        let _ = set_file_mtime(&dst, FileTime::from_system_time(mtime));
-                    }
+                if let Ok(meta) = fs::metadata(&src)
+                    && let Ok(mtime) = meta.modified()
+                {
+                    let _ = set_file_mtime(&dst, FileTime::from_system_time(mtime));
                 }
                 Ok(())
             }
@@ -873,11 +873,11 @@ async fn copy_with_progress(
         }
         staged?;
         // Preserve source mtime on the destination.
-        if let Ok(meta) = fs::metadata(&src) {
-            if let Ok(mtime) = meta.modified() {
-                let ft = FileTime::from_system_time(mtime);
-                let _ = set_file_mtime(&dst, ft);
-            }
+        if let Ok(meta) = fs::metadata(&src)
+            && let Ok(mtime) = meta.modified()
+        {
+            let ft = FileTime::from_system_time(mtime);
+            let _ = set_file_mtime(&dst, ft);
         }
         Ok(())
     })
