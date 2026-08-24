@@ -157,7 +157,7 @@ export const licenses: LicenseEntry[] = [
   { name: "source-map-js", version: "1.2.1", license: "BSD-3-Clause", copyright: "© 2009-2011, Mozilla Foundation and contributors", url: "https://github.com/7rulnik/source-map-js" },
   { name: "svelte", version: "5.56.10", license: "MIT", copyright: "© 2016-2025 Svelte Contributors", url: "https://svelte.dev" },
   { name: "svelte-check", version: "4.7.6", license: "MIT", copyright: "© 2020-Present these people", url: "https://github.com/sveltejs/language-tools#readme" },
-  { name: "syn", version: "2.0.119, 3.0.3", license: "MIT OR Apache-2.0", copyright: "© David Tolnay", url: "https://github.com/dtolnay/syn" },
+  { name: "syn", version: "2.0.119, 3.0.4", license: "MIT OR Apache-2.0", copyright: "© David Tolnay", url: "https://github.com/dtolnay/syn" },
   { name: "sync_wrapper", version: "1.0.2", license: "Apache-2.0", copyright: "© Actyx AG", url: "https://github.com/Actyx/sync_wrapper" },
   { name: "sysinfo", version: "0.39.6", license: "MIT", copyright: "© 2015 Guillaume Gomez", url: "https://github.com/GuillaumeGomez/sysinfo" },
   { name: "thiserror", version: "2.0.20", license: "MIT OR Apache-2.0", copyright: "© David Tolnay", url: "https://github.com/dtolnay/thiserror" },
