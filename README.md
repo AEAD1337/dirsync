@@ -4,11 +4,11 @@
   <img src="frontend/public/favicon.svg" width="80" alt="dirsync logo" />
 </p>
 
-One-way directory mirror sync with smart rename/move detection.
+One-way directory mirror sync with smart rename/move detection to minimize writes.
 
 Mirrors a source directory into a destination directory: copying new files, overwriting changed ones, removing orphans, and detecting renames/moves within the destination so they become cheap in-place operations instead of a delete + re-copy.
 
-Available as both a CLI tool and a local web GUI. Runs on **Windows, macOS, and Linux**.
+Available as both a CLI tool and an optional local web GUI. Runs on Windows, macOS, and Linux. CLI/core written in Rust, frontend written with Svelte and TypeScript.
 
 ### GUI
 <img width="773" height="410" alt="grafik" src="https://github.com/user-attachments/assets/2303793a-927c-4471-9fc6-0354422b7b87" />
@@ -83,7 +83,7 @@ Both the CLI and the GUI refuse a sync when:
   destination as an orphan, and a destination inside its source would copy
   its own output one level deeper on every run
 - either endpoint is a system-critical directory (`C:\Windows`,
-  `C:\Program Files`, `/etc`, `/boot`, …): pass `--yolo` to override
+  `C:\Program Files`, `/etc`, `/boot`, …), pass `--yolo` to override
 
 Paths are canonicalized before these checks, so `..` traversal forms cannot
 slip past them.
@@ -139,7 +139,7 @@ CLI flags override config values for that run but do not write back to the file.
 ## How it works
 
 1. **Detect**: each endpoint's drive type is probed (Windows: TRIM query; Linux/macOS: sysinfo). The result is kept per endpoint: it sets that side's hashing to serial (HDD) or all-cores (SSD), and forces serial copies if *either* side is spinning media
-2. **Walk**: both trees are scanned concurrently, always, whatever the drive types: each walk reads only its own endpoint, so the two never contend for one spindle. Each entry records size, mtime, and symlink target: no hashing happens here
+2. **Walk**: both trees are scanned concurrently, always, whatever the drive types; each walk reads only its own endpoint, so the two never contend for one spindle. Each entry records size, mtime, and symlink target; no hashing happens here
 3. **Match**: SRC files are matched against DST files, and the SHA-256 fingerprints are computed here, only for the candidates that actually need one; identical files (same path and size with mtimes within a 3 s tolerance, or a confirmed hash match) are skipped; files with matching hash but diverged mtime get their DST mtime corrected in-place; files present only in DST are marked for deletion
 4. **Rename detection**: DST-only files whose hash matches a SRC-only file are turned into a `Move` operation instead of `Delete` + `Copy`
 5. **Execute**: operations run in dependency order: directories created first, files copied/moved/overwritten, orphaned files deleted, empty directories removed last
