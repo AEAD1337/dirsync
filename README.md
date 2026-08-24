@@ -1,8 +1,18 @@
-# dirsync &nbsp;![version](https://img.shields.io/badge/version-1.1.4-blue)
+[![Release](https://img.shields.io/github/v/release/AEAD1337/dirsync?logo=github)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
+[![CI](https://github.com/AEAD1337/dirsync/actions/workflows/rust.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/rust.yml) &nbsp;
+[![License](https://img.shields.io/badge/license-GPL--3.0--only-blue)](https://github.com/AEAD1337/dirsync/blob/main/LICENSE) &nbsp;
+[![Rust](https://img.shields.io/badge/Rust-000000.svg?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/) &nbsp;
+[![Svelte](https://img.shields.io/badge/Svelte-FF3E00.svg?style=flat&logo=svelte&logoColor=white)](https://svelte.dev/) &nbsp;
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6.svg?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/) &nbsp;
+![Linux](https://img.shields.io/badge/Linux-FCC624.svg?style=flat&logo=linux&logoColor=black) &nbsp;
+![macOS](https://img.shields.io/badge/macOS-000000.svg?style=flat&logo=apple&logoColor=white) &nbsp;
+![Windows](https://img.shields.io/badge/Windows-0078D6.svg?style=flat&logo=windows&logoColor=white)
 
-<p align="center">
+# dirsync
+
+<div align="center">
   <img src="frontend/public/favicon.svg" width="80" alt="dirsync logo" />
-</p>
+</div>
 
 One-way directory mirror sync with smart rename/move detection to minimize writes.
 
@@ -11,7 +21,9 @@ Mirrors a source directory into a destination directory: copying new files, over
 Available as both a CLI tool and an optional local web GUI. Runs on Windows, macOS, and Linux. CLI/core written in Rust, frontend written with Svelte and TypeScript.
 
 ### GUI
-<img width="773" height="410" alt="grafik" src="https://github.com/user-attachments/assets/2303793a-927c-4471-9fc6-0354422b7b87" />
+<div align="center">
+  <img width="770" alt="GUI Example" src="https://github.com/user-attachments/assets/2303793a-927c-4471-9fc6-0354422b7b87" style="border: 1px solid #bbb; border-radius: 8px;"/>
+</div>
 
 ### CLI
 ```
@@ -63,8 +75,8 @@ Options:
       --config <PATH>        Path to config file
       --port <PORT>          Override GUI server port (1024-65535)
       --gui                  Launch the web GUI
-  -h, --help                 Print help
-  -V, --version              Print version
+  -h, --help                 Print this help and exit
+  -V, --version              Print version and exit
 
 Subcommands:
   completions <SHELL>        Print a shell completion script
