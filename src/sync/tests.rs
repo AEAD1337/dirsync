@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use filetime::{set_file_mtime, FileTime};
+use filetime::{FileTime, set_file_mtime};
 use tempfile::TempDir;
 
 use crate::config::AppConfig;
@@ -1240,26 +1240,34 @@ fn test_serial_copies_only_when_an_endpoint_is_hdd() {
     use crate::drive::DriveProfile;
     // Copies read SRC and write DST, so either side being spinning media
     // forces them serial; scanning is per-endpoint and never constrained.
-    assert!(DriveProfile {
-        src_hdd: true,
-        dst_hdd: true
-    }
-    .serial_copies());
-    assert!(DriveProfile {
-        src_hdd: true,
-        dst_hdd: false
-    }
-    .serial_copies());
-    assert!(DriveProfile {
-        src_hdd: false,
-        dst_hdd: true
-    }
-    .serial_copies());
-    assert!(!DriveProfile {
-        src_hdd: false,
-        dst_hdd: false
-    }
-    .serial_copies());
+    assert!(
+        DriveProfile {
+            src_hdd: true,
+            dst_hdd: true
+        }
+        .serial_copies()
+    );
+    assert!(
+        DriveProfile {
+            src_hdd: true,
+            dst_hdd: false
+        }
+        .serial_copies()
+    );
+    assert!(
+        DriveProfile {
+            src_hdd: false,
+            dst_hdd: true
+        }
+        .serial_copies()
+    );
+    assert!(
+        !DriveProfile {
+            src_hdd: false,
+            dst_hdd: false
+        }
+        .serial_copies()
+    );
     assert!(DriveProfile::all_hdd(true).serial_copies());
     assert!(!DriveProfile::all_hdd(false).serial_copies());
 }

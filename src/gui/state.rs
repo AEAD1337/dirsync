@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::progress::{new_progress_channel, LogEntry, ProgressState};
+use crate::progress::{LogEntry, ProgressState, new_progress_channel};
 use crate::sync::planner::SyncPlan;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;

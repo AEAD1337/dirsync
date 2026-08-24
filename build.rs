@@ -64,7 +64,9 @@ fn main() {
         "npm"
     };
     if Command::new(npm_cmd).arg("--version").output().is_err() {
-        println!("cargo:warning=npm not found - skipping frontend build. Install Node.js to build the GUI.");
+        println!(
+            "cargo:warning=npm not found - skipping frontend build. Install Node.js to build the GUI (https://nodejs.org/en/download)."
+        );
         return;
     }
 

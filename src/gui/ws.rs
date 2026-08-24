@@ -15,14 +15,14 @@ pub(crate) fn push_log_entry(
 }
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
 use serde::Serialize;
-use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::Duration;
 use tokio::time::interval;
 

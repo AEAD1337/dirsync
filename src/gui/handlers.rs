@@ -1,9 +1,9 @@
 use crate::config::AppConfig;
 use crate::gui::state::AppState;
 use crate::progress::LogLevel;
-use crate::sync::planner::SyncPlan;
 use crate::sync::SyncEngine;
-use axum::{extract::State, http::StatusCode, Json};
+use crate::sync::planner::SyncPlan;
+use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;

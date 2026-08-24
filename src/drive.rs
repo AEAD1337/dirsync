@@ -102,7 +102,6 @@ fn drive_letter(path: &Path) -> Option<char> {
 use std::mem;
 #[cfg(windows)]
 use windows::{
-    core::PCWSTR,
     Win32::{
         Foundation::{CloseHandle, HANDLE},
         Storage::FileSystem::{
@@ -110,13 +109,14 @@ use windows::{
             OPEN_EXISTING,
         },
         System::{
-            Ioctl::{
-                PropertyStandardQuery, StorageDeviceTrimProperty, DEVICE_TRIM_DESCRIPTOR,
-                IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_PROPERTY_QUERY,
-            },
             IO::DeviceIoControl,
+            Ioctl::{
+                DEVICE_TRIM_DESCRIPTOR, IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery,
+                STORAGE_PROPERTY_QUERY, StorageDeviceTrimProperty,
+            },
         },
     },
+    core::PCWSTR,
 };
 
 #[cfg(windows)]
@@ -141,24 +141,26 @@ unsafe fn query_property<T>(
     handle: HANDLE,
     property_id: windows::Win32::System::Ioctl::STORAGE_PROPERTY_ID,
 ) -> windows::core::Result<T> {
-    let query = STORAGE_PROPERTY_QUERY {
-        PropertyId: property_id,
-        QueryType: PropertyStandardQuery,
-        AdditionalParameters: [0u8; 1],
-    };
-    let mut output: T = mem::zeroed();
-    let mut returned = 0u32;
-    DeviceIoControl(
-        handle,
-        IOCTL_STORAGE_QUERY_PROPERTY,
-        Some(&query as *const _ as *const std::ffi::c_void),
-        mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-        Some(&mut output as *mut _ as *mut std::ffi::c_void),
-        mem::size_of::<T>() as u32,
-        Some(&mut returned),
-        None,
-    )?;
-    Ok(output)
+    unsafe {
+        let query = STORAGE_PROPERTY_QUERY {
+            PropertyId: property_id,
+            QueryType: PropertyStandardQuery,
+            AdditionalParameters: [0u8; 1],
+        };
+        let mut output: T = mem::zeroed();
+        let mut returned = 0u32;
+        DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(&query as *const _ as *const std::ffi::c_void),
+            mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            Some(&mut output as *mut _ as *mut std::ffi::c_void),
+            mem::size_of::<T>() as u32,
+            Some(&mut returned),
+            None,
+        )?;
+        Ok(output)
+    }
 }
 
 /// Returns `Some(true)` = SSD, `Some(false)` = no TRIM (likely HDD), `None` = query failed.

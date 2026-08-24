@@ -1,12 +1,12 @@
 use crate::gui::{assets::static_handler, handlers, state::AppState, ws::ws_handler};
 use crate::progress::ProgressEvent;
 use axum::{
+    Router,
     extract::Request,
     http::StatusCode,
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
-    Router,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -190,7 +190,7 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate()).unwrap_or_else(|_| {
             // If we can't register SIGTERM, just use a future that never resolves.
             signal(SignalKind::hangup()).expect("failed to install signal handler")

@@ -2,7 +2,7 @@
 use dirsync::gui;
 use dirsync::{cli, cli_ui, completions, config, drive, paths, progress, sync};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::sync::Arc;
 
 #[tokio::main]

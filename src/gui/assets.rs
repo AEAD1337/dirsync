@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{header, Response, StatusCode, Uri},
+    http::{Response, StatusCode, Uri, header},
     response::IntoResponse,
 };
 use rust_embed::RustEmbed;

@@ -1,8 +1,8 @@
 use dirsync::config::AppConfig;
-use dirsync::progress::{new_progress_channel, SyncStatus};
-use dirsync::sync::executor::{execute, ExecuteOptions};
-use dirsync::sync::planner::{SyncOp, SyncPlan};
+use dirsync::progress::{SyncStatus, new_progress_channel};
 use dirsync::sync::SyncEngine;
+use dirsync::sync::executor::{ExecuteOptions, execute};
+use dirsync::sync::planner::{SyncOp, SyncPlan};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;

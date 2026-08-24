@@ -1,4 +1,4 @@
-use dirsync::progress::{new_progress_channel, LogLevel, ProgressEvent};
+use dirsync::progress::{LogLevel, ProgressEvent, new_progress_channel};
 use dirsync::sync::{matcher::match_trees, walker::FileEntry};
 use std::fs;
 use std::path::PathBuf;

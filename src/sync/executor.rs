@@ -1,15 +1,15 @@
-use super::planner::{SyncOp, SyncPlan, OP_TOKEN_BYTES};
+use super::planner::{OP_TOKEN_BYTES, SyncOp, SyncPlan};
 use crate::error::SkipLog;
 use crate::progress::{ProgressEvent, ProgressState, SyncStatus};
 use anyhow::Result;
-use filetime::{set_file_mtime, FileTime};
+use filetime::{FileTime, set_file_mtime};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
 const COPY_BUF: usize = 256 * 1024;
