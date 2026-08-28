@@ -244,10 +244,18 @@ jobs:
             git push origin --delete rolling || true
             git tag -f rolling
             git push origin rolling --force
+            cat > /tmp/release-notes.md <<'NOTES'
+            Latest automated build from main.
+
+            | OS | Linux | Windows |
+            | --- | --- | --- |
+            | GUI | [dirsync](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync) | [dirsync.exe](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync.exe) |
+            | CLI | [dirsync-cli](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync-cli) | [dirsync-cli.exe](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync-cli.exe) |
+            NOTES
             gh release create rolling \
               --title "Rolling" \
               --latest \
-              --notes "Latest automated build from main." \
+              --notes-file /tmp/release-notes.md \
               artifacts/dirsync.exe \
               artifacts/dirsync \
               artifacts/dirsync-cli.exe \
