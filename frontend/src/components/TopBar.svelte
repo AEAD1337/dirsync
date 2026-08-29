@@ -99,13 +99,14 @@
     statTimers[side] = setTimeout(() => runStatCheck(path, side), 350);
   }
 
-  // A path can become valid without any input event: the user mounts the
-  // container, plugs the drive back in or the share reconnects. Re-stat the
-  // sides that are currently flagged red so the GUI picks that up on its own.
+  // Availability changes without any input event, in both directions: the
+  // user mounts the container, plugs the drive back in or the share
+  // reconnects, and equally unmounts, unplugs or loses it again. Re-stat both
+  // sides so the GUI tracks that on its own instead of waiting for an edit.
   $effect(() => {
     const timer = setInterval(() => {
-      if (srcExists === false && $src.trim()) runStatCheck($src, 'src');
-      if (dstExists === false && $dst.trim()) runStatCheck($dst, 'dst');
+      if (srcExists !== null && $src.trim()) runStatCheck($src, 'src');
+      if (dstExists !== null && $dst.trim()) runStatCheck($dst, 'dst');
     }, 500);
     return () => clearInterval(timer);
   });
