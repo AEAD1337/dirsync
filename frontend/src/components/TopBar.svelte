@@ -66,6 +66,29 @@
   let statTimers: Record<string, ReturnType<typeof setTimeout>> = {};
   let completeTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
+  // One in-flight stat per side: a path on a stalled network share or a
+  // sleeping drive can take seconds to answer, and the 500ms poller below
+  // must not stack requests behind it.
+  let statInFlight: Record<string, boolean> = {};
+
+  async function runStatCheck(path: string, side: 'src' | 'dst') {
+    if (statInFlight[side]) return;
+    statInFlight[side] = true;
+    let ok = false;
+    try {
+      const s = await api.stat(path);
+      ok = s.exists && s.is_dir;
+    } catch {
+      ok = false;
+    } finally {
+      statInFlight[side] = false;
+    }
+    // Drop the result if the user edited the path while the stat was running.
+    if (path !== (side === 'src' ? $src : $dst)) return;
+    if (side === 'src') srcExists = ok;
+    else dstExists = ok;
+  }
+
   function scheduleStatCheck(path: string, side: 'src' | 'dst') {
     clearTimeout(statTimers[side]);
     if (!path.trim()) {
@@ -73,20 +96,19 @@
       else dstExists = null;
       return;
     }
-    statTimers[side] = setTimeout(async () => {
-      try {
-        const s = await api.stat(path);
-        if (side === 'src') {
-          srcExists = s.exists && s.is_dir;
-        } else {
-          dstExists = s.exists && s.is_dir;
-        }
-      } catch {
-        if (side === 'src') srcExists = false;
-        else dstExists = false;
-      }
-    }, 350);
+    statTimers[side] = setTimeout(() => runStatCheck(path, side), 350);
   }
+
+  // A path can become valid without any input event: the user mounts the
+  // container, plugs the drive back in or the share reconnects. Re-stat the
+  // sides that are currently flagged red so the GUI picks that up on its own.
+  $effect(() => {
+    const timer = setInterval(() => {
+      if (srcExists === false && $src.trim()) runStatCheck($src, 'src');
+      if (dstExists === false && $dst.trim()) runStatCheck($dst, 'dst');
+    }, 500);
+    return () => clearInterval(timer);
+  });
 
   function scheduleComplete(path: string, side: 'src' | 'dst') {
     clearTimeout(completeTimers[side]);
