@@ -47,6 +47,10 @@ jobs:
     # Linux-only PR pipeline. SBOM generation, staging, and the artifact
     # upload are release concerns and stay push/dispatch-only below.
     runs-on: windows-latest
+    # Least privilege: these jobs only read the repository and upload
+    # artifacts. Only the release job below needs contents: write.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -111,6 +115,10 @@ jobs:
 
   test-and-build-linux:
     runs-on: ubuntu-latest
+    # Least privilege: these jobs only read the repository and upload
+    # artifacts. Only the release job below needs contents: write.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
