@@ -1,0 +1,44 @@
+name: Audit
+
+# RustSec advisories are published independently of this repository, so a
+# dependency set that was clean yesterday can be vulnerable today without a
+# single commit landing: hence the weekly schedule alongside the push trigger.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Third-party action pinned to a full commit SHA: a tag can be moved to
+      # point at different code, a commit SHA cannot. v2.87.5.
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8
+        with:
+          tool: cargo-audit
+      # Plain `cargo audit` fails on vulnerabilities only. Unmaintained and
+      # yanked crates are reported as warnings and do not fail the run: they
+      # are usually transitive and not fixable here, and turning them into
+      # errors would leave the badge red on something we cannot act on.
+      - name: Audit dependencies
+        run: cargo audit

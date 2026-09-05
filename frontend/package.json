@@ -8,6 +8,9 @@
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
+  "engines": {
+    "node": "^20.19 || ^22.12 || >=24"
+  },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7",
     "svelte": "^5",

@@ -4,7 +4,7 @@ set -euo pipefail
 ACTION="${1:-}"
 if [[ -z "$ACTION" ]]; then
     echo "Usage: ./make.sh <action>"
-    echo "Actions: all build clean sweep release run test update size loc"
+    echo "Actions: all build clean sweep release run test update size loc coverage"
     exit 1
 fi
 
@@ -79,6 +79,13 @@ case "$ACTION" in
     sweep)
         run cargo sweep --installed
         ;;
+    coverage)
+        # CLI-only on purpose: the gui modules are axum wiring and WebSocket
+        # plumbing with no test harness, so including them only dilutes the
+        # number for the code the tests actually exercise.
+        run cargo llvm-cov --no-default-features --summary-only # cargo install cargo-llvm-cov
+        ;;
+
     size)
         run cargo bloat --release --features gui --crates
         ;;

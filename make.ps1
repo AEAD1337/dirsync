@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("all", "build", "bundle", "clean", "sweep", "release", "run", "test", "update", "size", "loc")]
+    [ValidateSet("all", "build", "bundle", "clean", "sweep", "release", "run", "test", "update", "size", "loc", "coverage")]
     [string]$Action
 )
 
@@ -144,6 +144,13 @@ switch ($Action) {
 
     "sweep" {
         Run-Command "cargo sweep --installed" # cargo install cargo-sweep
+    }
+
+    "coverage" {
+        # CLI-only on purpose: the gui modules are axum wiring and WebSocket
+        # plumbing with no test harness, so including them only dilutes the
+        # number for the code the tests actually exercise.
+        Run-Command "cargo llvm-cov --no-default-features --summary-only" # cargo install cargo-llvm-cov
     }
 
     "size" {

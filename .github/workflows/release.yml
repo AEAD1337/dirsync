@@ -21,6 +21,7 @@ on:
       - ".gitignore"
       - "make.ps1"
       - "make.sh"
+      - ".github/badges/**"
   pull_request:
     branches: ["main"]
     paths-ignore:
@@ -31,6 +32,7 @@ on:
       - ".gitignore"
       - "make.ps1"
       - "make.sh"
+      - ".github/badges/**"
 
 env:
   CARGO_TERM_COLOR: always

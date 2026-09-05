@@ -1,0 +1,95 @@
+name: Coverage
+
+# Same paths-ignore lists as release.yml: a change that cannot alter the code
+# under test cannot alter coverage either. The lists are duplicated by hand
+# because GitHub's workflow parser does not support YAML anchors.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "**/*.md"
+      - "doc/**"
+      - "reviews/**"
+      - "LICENSE"
+      - ".gitignore"
+      - "make.ps1"
+      - "make.sh"
+      - ".github/badges/**"
+  pull_request:
+    branches: ["main"]
+    paths-ignore:
+      - "**/*.md"
+      - "doc/**"
+      - "reviews/**"
+      - "LICENSE"
+      - ".gitignore"
+      - "make.ps1"
+      - "make.sh"
+      - ".github/badges/**"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to commit the badge payload back to main.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Add llvm-tools
+        run: rustup component add llvm-tools-preview
+      # Third-party action pinned to a full commit SHA: a tag can be moved to
+      # point at different code, a commit SHA cannot. v2.87.5.
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8
+        with:
+          tool: cargo-llvm-cov
+      # CLI-only, matching `make.ps1 coverage`: the gui modules are axum wiring
+      # and WebSocket plumbing with no test harness, so including them only
+      # dilutes the number for the code the tests actually exercise. It also
+      # keeps Node out of this job, since build.rs skips Vite without the gui
+      # feature.
+      - name: Collect coverage
+        run: cargo llvm-cov --no-default-features --summary-only --json --output-path coverage-summary.json
+      - name: Report
+        run: |
+          pct=$(jq -r '.data[0].totals.lines.percent' coverage-summary.json)
+          printf 'CLI line coverage: %.2f%%\n' "$pct" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.data[0].totals | "functions: \(.functions.percent | floor)%, regions: \(.regions.percent | floor)%"' coverage-summary.json >> "$GITHUB_STEP_SUMMARY"
+      # The badge is served by shields.io's endpoint API from a JSON file
+      # committed to main: no third-party coverage service, no upload token,
+      # and no extra branch. `.github/badges/**` is in every paths-ignore list
+      # in this repository (Audit uses an allowlist and never matches it), so
+      # the commit made here cannot trigger another CI run.
+      - name: Publish badge
+        if: github.event_name != 'pull_request'
+        run: |
+          pct=$(jq -r '.data[0].totals.lines.percent | floor' coverage-summary.json)
+          if   [ "$pct" -ge 80 ]; then color=brightgreen
+          elif [ "$pct" -ge 70 ]; then color=green
+          elif [ "$pct" -ge 50 ]; then color=yellow
+          else color=red; fi
+          mkdir -p .github/badges
+          payload='{schemaVersion: 1, label: "Coverage", message: $m, color: $c}'
+          jq -n --arg m "$pct%" --arg c "$color" "$payload" > .github/badges/coverage.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Stage first, then compare against the index: a plain `git diff` on
+          # an untracked file reports no change, which would skip the very
+          # first publish. Most pushes leave the rounded percentage untouched,
+          # and committing only when it moves keeps main free of badge noise.
+          git add .github/badges/coverage.json
+          if git diff --cached --quiet -- .github/badges/coverage.json; then
+            echo "Coverage still $pct%, badge unchanged"
+            exit 0
+          fi
+          git commit -m "coverage badge: $pct%"
+          # Another push can land while the tests run, which would reject a
+          # plain push: rebase onto whatever main is now and try again.
+          git pull --rebase origin main
+          git push origin HEAD:main

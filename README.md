@@ -1,20 +1,23 @@
-[![Release](https://img.shields.io/github/v/release/AEAD1337/dirsync?logo=github)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
-[![CI](https://github.com/AEAD1337/dirsync/actions/workflows/rust.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/rust.yml) &nbsp;
-[![License](https://img.shields.io/badge/license-GPL--3.0--only-blue)](https://github.com/AEAD1337/dirsync/blob/main/LICENSE) &nbsp;
-[![Rust](https://img.shields.io/badge/Rust-000000.svg?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/) &nbsp;
-[![Svelte](https://img.shields.io/badge/Svelte-FF3E00.svg?style=flat&logo=svelte&logoColor=white)](https://svelte.dev/) &nbsp;
-[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6.svg?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/) &nbsp;
+[![Version](https://img.shields.io/badge/Version-1.1.4-blue?style=flat)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
+[![Release](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml) &nbsp;
+[![Audit](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml) &nbsp;
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/AEAD1337/dirsync/main/.github/badges/coverage.json)](https://github.com/AEAD1337/dirsync/actions/workflows/coverage.yml) &nbsp;
+[![License](https://img.shields.io/badge/License-GPL--3.0--only-blue)](https://github.com/AEAD1337/dirsync/blob/main/LICENSE) &nbsp;
+[![Rust](https://img.shields.io/badge/Rust-edition%202024-000000?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/) &nbsp;
+[![Svelte](https://img.shields.io/badge/Svelte-5-FF3E00?style=flat&logo=svelte&logoColor=white)](https://svelte.dev/) &nbsp;
+[![TypeScript](https://img.shields.io/badge/TypeScript-6%20strict-3178C6?style=flat&logo=typescript&logoColor=white)](frontend/tsconfig.json) &nbsp;
+[![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020.19-5FA04E?style=flat&logo=nodedotjs&logoColor=white)](https://nodejs.org/) &nbsp;
+[![Clippy](https://img.shields.io/badge/Clippy-deny%20warnings-000000?style=flat&logo=rust&logoColor=white)](https://github.com/AEAD1337/dirsync/blob/main/.github/workflows/release.yml) &nbsp;
+[![SBOM](https://img.shields.io/badge/SBOM-CycloneDX-394EFF?style=flat)](https://github.com/AEAD1337/dirsync/releases/tag/rolling) &nbsp;
 ![Linux](https://img.shields.io/badge/Linux-FCC624.svg?style=flat&logo=linux&logoColor=black) &nbsp;
 ![macOS](https://img.shields.io/badge/macOS-000000.svg?style=flat&logo=apple&logoColor=white) &nbsp;
 ![Windows](https://img.shields.io/badge/Windows-0078D6.svg?style=flat&logo=windows&logoColor=white)
 
-# dirsync
-
 <div align="center">
+  <h1>dirsync</h1>
   <img src="frontend/public/favicon.svg" width="80" alt="dirsync logo" />
+  <p>One-way directory mirror sync with smart rename/move detection to minimize writes.</p>
 </div>
-
-One-way directory mirror sync with smart rename/move detection to minimize writes.
 
 Mirrors a source directory into a destination directory: copying new files, overwriting changed ones, removing orphans, and detecting renames/moves within the destination so they become cheap in-place operations instead of a delete + re-copy.
 
@@ -155,6 +158,24 @@ CLI flags override config values for that run but do not write back to the file.
 3. **Match**: SRC files are matched against DST files, and the SHA-256 fingerprints are computed here, only for the candidates that actually need one; identical files (same path and size with mtimes within a 3 s tolerance, or a confirmed hash match) are skipped; files with matching hash but diverged mtime get their DST mtime corrected in-place; files present only in DST are marked for deletion
 4. **Rename detection**: DST-only files whose hash matches a SRC-only file are turned into a `Move` operation instead of `Delete` + `Copy`
 5. **Execute**: operations run in dependency order: directories created first, files copied/moved/overwritten, orphaned files deleted, empty directories removed last
+
+## Coverage
+
+The **Coverage** badge reports line coverage of the CLI build
+(`--no-default-features`), measured by `cargo llvm-cov` on every push that can
+change the code. The GUI modules are excluded on purpose: the axum server,
+WebSocket layer and embedded assets have no test harness, so counting them
+would only dilute the figure for the sync engine that the tests do exercise.
+
+Reproduce it locally with:
+
+```
+.\make.ps1 coverage    # ./make.sh coverage on non-Windows shells
+```
+
+CI writes the same numbers (lines, functions, regions) into each run summary
+and stores the badge payload at `.github/badges/coverage.json`, which shields.io
+reads directly: no third-party coverage service and no upload token.
 
 ## Documentation
 

@@ -697,10 +697,10 @@ fn sync_readme_version(root: &Path, cargo_version: &str) {
     }
 }
 
-/// Replace `version-X.Y.Z-blue` in a shields.io badge URL with the new version.
+/// Replace `Version-X.Y.Z-blue` in a shields.io badge URL with the new version.
 fn regex_replace_badge(line: &str, version: &str) -> String {
-    // Find `version-` followed by digits/dots then `-blue`
-    let marker = "version-";
+    // Find `Version-` followed by digits/dots then `-blue`
+    let marker = "Version-";
     let suffix = "-blue";
     if let Some(start) = line.find(marker) {
         let after = &line[start + marker.len()..];
