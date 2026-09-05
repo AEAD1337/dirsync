@@ -1,6 +1,6 @@
 [package]
 name = "dirsync"
-version = "1.1.4"
+version = "1.1.5"
 edition = "2024"
 description = "One-way directory mirror sync with smart rename/move detection"
 license = "GPL-3.0-only"

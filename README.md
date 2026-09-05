@@ -1,4 +1,6 @@
-[![Version](https://img.shields.io/badge/Version-1.1.4-blue?style=flat)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
+<div align="center">
+
+[![Version](https://img.shields.io/badge/Version-1.1.5-blue?style=flat)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
 [![Release](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml) &nbsp;
 [![Audit](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml) &nbsp;
 [![CodeQL](https://github.com/AEAD1337/dirsync/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/AEAD1337/dirsync/security/code-scanning) &nbsp;
@@ -13,6 +15,8 @@
 ![Linux](https://img.shields.io/badge/Linux-FCC624.svg?style=flat&logo=linux&logoColor=black) &nbsp;
 ![macOS](https://img.shields.io/badge/macOS-000000.svg?style=flat&logo=apple&logoColor=white) &nbsp;
 ![Windows](https://img.shields.io/badge/Windows-0078D6.svg?style=flat&logo=windows&logoColor=white)
+
+</div>
 
 <div align="center">
   <h1>dirsync</h1>
@@ -186,7 +190,6 @@ reads directly: no third-party coverage service and no upload token.
 
 ## License
 
-Copyright (c) 2026 AEAD1337
-
+Copyright (c) 2026 AEAD1337  
 GPL-3.0-only, see [LICENSE](LICENSE) for details.  
 Third-party dependency licenses are listed in **Help → Third-Party Licenses** in the GUI.

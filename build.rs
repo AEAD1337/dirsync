@@ -679,17 +679,22 @@ fn sync_readme_version(root: &Path, cargo_version: &str) {
             return;
         }
     };
-    let updated = {
-        let mut lines = content.splitn(2, '\n');
-        let first = lines.next().unwrap_or("");
-        let rest = lines.next().unwrap_or("");
-        let new_first = regex_replace_badge(first, cargo_version);
-        if rest.is_empty() {
-            new_first
-        } else {
-            format!("{new_first}\n{rest}")
-        }
-    };
+    // The badge is not pinned to the first line: the badge block sits in a
+    // centering <div>, so patch the first line that carries the marker.
+    let mut patched = false;
+    let updated: String = content
+        .split_inclusive('\n')
+        .map(|line| {
+            if patched {
+                return line.to_string();
+            }
+            let new_line = regex_replace_badge(line, cargo_version);
+            if new_line != line {
+                patched = true;
+            }
+            new_line
+        })
+        .collect();
     if updated != content
         && let Err(e) = std::fs::write(&path, &updated)
     {
