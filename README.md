@@ -1,6 +1,7 @@
 [![Version](https://img.shields.io/badge/Version-1.1.4-blue?style=flat)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
 [![Release](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml) &nbsp;
 [![Audit](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml) &nbsp;
+[![CodeQL](https://github.com/AEAD1337/dirsync/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/AEAD1337/dirsync/security/code-scanning) &nbsp;
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/AEAD1337/dirsync/main/.github/badges/coverage.json)](https://github.com/AEAD1337/dirsync/actions/workflows/coverage.yml) &nbsp;
 [![License](https://img.shields.io/badge/License-GPL--3.0--only-blue)](https://github.com/AEAD1337/dirsync/blob/main/LICENSE) &nbsp;
 [![Rust](https://img.shields.io/badge/Rust-edition%202024-000000?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/) &nbsp;

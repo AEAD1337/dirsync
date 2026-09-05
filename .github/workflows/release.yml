@@ -250,10 +250,13 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 5
           command: |
-            gh release delete rolling --yes || true
-            git push origin --delete rolling || true
-            git tag -f rolling
-            git push origin rolling --force
+            # The tag is created through the API (--cleanup-tag on delete,
+            # --target on create), never by `git push`: GITHUB_TOKEN belongs
+            # to a GitHub App, and pushing a ref whose tree carries
+            # .github/workflows/ is rejected without a `workflows` scope that
+            # the token cannot be granted. Deleting release and tag together
+            # also stops a retry from finding a stale tag with no release.
+            gh release delete rolling --yes --cleanup-tag || true
             cat > /tmp/release-notes.md <<'NOTES'
             Latest automated build from main.
 
@@ -263,6 +266,7 @@ jobs:
             | CLI | [dirsync-cli](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync-cli) | [dirsync-cli.exe](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync-cli.exe) |
             NOTES
             gh release create rolling \
+              --target "$GITHUB_SHA" \
               --title "Rolling" \
               --latest \
               --notes-file /tmp/release-notes.md \

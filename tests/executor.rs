@@ -793,7 +793,10 @@ async fn test_cancel_during_a_large_copy_leaves_no_staging_file() {
         cancel_rx,
     ));
     tokio::time::sleep(Duration::from_millis(5)).await;
-    cancel_tx.send(true).unwrap();
+    // A fast machine can finish the copy inside those 5ms, dropping the
+    // receiver and making the send fail. That is a valid outcome, not a test
+    // failure: the invariant below holds either way.
+    let _ = cancel_tx.send(true);
     handle.await.unwrap();
 
     // Whether the copy beat the cancel or not, the staging file must be gone:
