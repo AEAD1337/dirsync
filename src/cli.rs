@@ -227,4 +227,75 @@ mod tests {
         assert_eq!(args.src, Some(PathBuf::from("/a path/src dir")));
         assert_eq!(args.dst, Some(PathBuf::from("/a path/dst dir")));
     }
+    #[test]
+    fn test_defaults_when_nothing_is_passed() {
+        let args = parse_args(&[]);
+        assert!(args.src.is_none() && args.dst.is_none());
+        assert!(!args.dry_run && !args.gui && !args.yolo);
+        assert!(args.exclude.is_empty());
+        assert!(args.port.is_none() && args.config.is_none());
+    }
+
+    #[test]
+    fn test_short_flags() {
+        let args = parse_args(&["-n", "-e", "*.tmp", "/src", "/dst"]);
+        assert!(args.dry_run);
+        assert_eq!(args.exclude, vec!["*.tmp"]);
+        assert_eq!(args.src, Some(PathBuf::from("/src")));
+        assert_eq!(args.dst, Some(PathBuf::from("/dst")));
+    }
+
+    #[test]
+    fn test_exclude_is_repeatable() {
+        let args = parse_args(&["-e", "*.tmp", "--exclude", "node_modules", "/src", "/dst"]);
+        assert_eq!(args.exclude, vec!["*.tmp", "node_modules"]);
+    }
+
+    #[test]
+    fn test_gui_and_yolo_flags() {
+        let args = parse_args(&["--gui", "--yolo"]);
+        assert!(args.gui);
+        assert!(args.yolo);
+    }
+
+    #[test]
+    fn test_port_within_range_is_accepted() {
+        let args = parse_args(&["--gui", "--port", "8080"]);
+        assert_eq!(args.port, Some(8080));
+    }
+
+    #[test]
+    fn test_config_path() {
+        let args = parse_args(&["--config", "/etc/dirsync.toml", "/src", "/dst"]);
+        assert_eq!(args.config, Some(PathBuf::from("/etc/dirsync.toml")));
+        // The config flag must not swallow the positional arguments.
+        assert_eq!(args.src, Some(PathBuf::from("/src")));
+        assert_eq!(args.dst, Some(PathBuf::from("/dst")));
+    }
+
+    #[test]
+    fn test_flags_may_follow_the_positionals() {
+        let args = parse_args(&["/src", "/dst", "--dry-run"]);
+        assert!(args.dry_run);
+        assert_eq!(args.dst, Some(PathBuf::from("/dst")));
+    }
+
+    #[test]
+    fn test_help_text_documents_every_option() {
+        // print_help and -h share one string, so asserting on HELP covers both.
+        print_help();
+        for flag in [
+            "--dry-run",
+            "--exclude",
+            "--gui",
+            "--port",
+            "--config",
+            "--yolo",
+            "--version",
+            "--help",
+        ] {
+            assert!(HELP.contains(flag), "{flag} missing from the help text");
+        }
+        assert!(HELP.contains("completions <SHELL>"));
+    }
 }

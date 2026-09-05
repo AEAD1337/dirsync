@@ -161,3 +161,48 @@ Register-ArgumentCompleter -Native -CommandName dirsync -ScriptBlock {
         }
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every supported shell must produce a script rather than the error arm.
+    /// The unknown-shell arm exits the process, so it is covered from the
+    /// outside in tests/cli_binary.rs instead.
+    #[test]
+    fn print_emits_a_script_for_every_supported_shell() {
+        for shell in ["bash", "zsh", "fish", "powershell"] {
+            print(shell);
+        }
+    }
+
+    #[test]
+    fn every_script_completes_the_completions_subcommand() {
+        for script in [BASH, ZSH, FISH, POWERSHELL] {
+            assert!(script.contains("dirsync"));
+            assert!(script.contains("completions"));
+        }
+    }
+
+    #[test]
+    fn every_script_offers_the_documented_flags() {
+        // fish spells long options without the leading dashes (`-l dry-run`),
+        // so the shared assertion uses the bare option name.
+        for script in [BASH, ZSH, FISH, POWERSHELL] {
+            for flag in ["dry-run", "exclude", "gui", "port", "yolo"] {
+                assert!(script.contains(flag), "{flag} missing from a script");
+            }
+        }
+    }
+
+    #[test]
+    fn shell_name_completion_lists_every_supported_shell() {
+        // The shells that complete the argument of `completions` must offer
+        // exactly the set `print` accepts.
+        for script in [BASH, FISH, POWERSHELL] {
+            for shell in ["bash", "zsh", "fish", "powershell"] {
+                assert!(script.contains(shell), "{shell} missing from a script");
+            }
+        }
+    }
+}

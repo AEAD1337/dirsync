@@ -257,3 +257,167 @@ fn format_duration(secs: u64) -> String {
         format!("{s}s")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progress::new_progress_channel;
+    use std::sync::atomic::Ordering;
+
+    /// Both loops end on their own once the terminal event arrives; the
+    /// timeout only keeps a regression from hanging the suite forever.
+    const LIMIT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn format_duration_switches_unit_with_magnitude() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(45), "45s");
+        assert_eq!(format_duration(60), "1m00s");
+        assert_eq!(format_duration(3599), "59m59s");
+        assert_eq!(format_duration(3600), "1h00m");
+        assert_eq!(format_duration(3725), "1h02m");
+    }
+
+    #[test]
+    fn update_overall_clamps_the_bar_to_its_length() {
+        let (progress, _rx) = new_progress_channel();
+        progress.ops_total.store(4, Ordering::Relaxed);
+        progress.ops_done.store(4, Ordering::Relaxed);
+        progress.total_bytes.store(100, Ordering::Relaxed);
+        // More bytes than planned: overall_pct must not push the bar past full.
+        progress.done_bytes.store(400, Ordering::Relaxed);
+
+        let ui = CliUi::default();
+        ui.update_overall(&progress);
+
+        assert_eq!(ui.overall_bar.length(), Some(1000));
+        assert!(ui.overall_bar.position() <= 1000);
+    }
+
+    #[tokio::test]
+    async fn scan_consumes_every_phase_and_stops_when_idle() {
+        let (progress, rx) = new_progress_channel();
+
+        for side in ["src", "dst"] {
+            progress.emit(ProgressEvent::ScanProgress {
+                phase: ScanPhase::Walking {
+                    side: side.to_owned(),
+                },
+                path: Some("some/file".to_owned()),
+            });
+            progress.emit(ProgressEvent::ScanProgress {
+                phase: ScanPhase::Walking {
+                    side: side.to_owned(),
+                },
+                path: Some(String::new()),
+            });
+            progress.emit(ProgressEvent::ScanProgress {
+                phase: ScanPhase::Walking {
+                    side: side.to_owned(),
+                },
+                path: None,
+            });
+            progress.emit(ProgressEvent::ScanProgress {
+                phase: ScanPhase::Walking {
+                    side: side.to_owned(),
+                },
+                path: Some("Done.".to_owned()),
+            });
+        }
+        progress.emit(ProgressEvent::ScanProgress {
+            phase: ScanPhase::Hashing,
+            path: Some("file".to_owned()),
+        });
+        progress.emit(ProgressEvent::ScanProgress {
+            phase: ScanPhase::Hashing,
+            path: None,
+        });
+        progress.emit(ProgressEvent::ScanProgress {
+            phase: ScanPhase::Planning,
+            path: None,
+        });
+        // Ignored by the scan loop, and must not end it.
+        progress.emit(ProgressEvent::PlanReady);
+        progress.emit(ProgressEvent::StatusChanged {
+            status: SyncStatus::Idle,
+        });
+
+        tokio::time::timeout(LIMIT, CliUi::scan(rx))
+            .await
+            .expect("scan should stop on the Idle status");
+    }
+
+    #[tokio::test]
+    async fn scan_stops_when_the_sender_is_dropped() {
+        let (progress, rx) = new_progress_channel();
+        drop(progress);
+
+        tokio::time::timeout(LIMIT, CliUi::scan(rx))
+            .await
+            .expect("scan should stop once the channel closes");
+    }
+
+    #[tokio::test]
+    async fn scan_stops_on_a_cancelled_status() {
+        let (progress, rx) = new_progress_channel();
+        progress.emit(ProgressEvent::StatusChanged {
+            status: SyncStatus::Cancelled,
+        });
+
+        tokio::time::timeout(LIMIT, CliUi::scan(rx))
+            .await
+            .expect("scan should stop on the Cancelled status");
+    }
+
+    #[tokio::test]
+    async fn run_tracks_a_file_and_finishes_on_done() {
+        let (progress, rx) = new_progress_channel();
+        progress.emit(ProgressEvent::FileStarted {
+            name: "a.txt".to_owned(),
+            size: 4096,
+        });
+        progress.emit(ProgressEvent::FileProgress { done_bytes: 2048 });
+        progress.emit(ProgressEvent::FileDone {
+            name: "a.txt".to_owned(),
+        });
+        // Neither status ends the loop, unlike Done/Cancelled below.
+        progress.emit(ProgressEvent::StatusChanged {
+            status: SyncStatus::Running,
+        });
+        progress.emit(ProgressEvent::StatusChanged {
+            status: SyncStatus::Done,
+        });
+
+        let ui = CliUi::new();
+        tokio::time::timeout(LIMIT, ui.run(Arc::clone(&progress), rx))
+            .await
+            .expect("run should return once the sync is done");
+    }
+
+    #[tokio::test]
+    async fn run_finishes_on_cancelled() {
+        let (progress, rx) = new_progress_channel();
+        progress.emit(ProgressEvent::StatusChanged {
+            status: SyncStatus::Cancelled,
+        });
+
+        let ui = CliUi::new();
+        tokio::time::timeout(LIMIT, ui.run(Arc::clone(&progress), rx))
+            .await
+            .expect("run should return once the sync is cancelled");
+    }
+
+    #[tokio::test]
+    async fn run_returns_when_the_sender_disappears() {
+        let (progress, _rx) = new_progress_channel();
+        // A channel of its own, closed immediately: the sync task dying without
+        // a final status must not leave the UI spinning forever.
+        let (tx, rx) = broadcast::channel(4);
+        drop(tx);
+
+        let ui = CliUi::new();
+        tokio::time::timeout(LIMIT, ui.run(progress, rx))
+            .await
+            .expect("run should return when the sender is gone");
+    }
+}
