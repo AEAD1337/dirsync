@@ -221,6 +221,11 @@
   const isPreviewing = $derived(status === 'previewing' || previewing);
   const isRunning = $derived(status === 'running' || running);
   const isPaused = $derived(status === 'paused');
+  // While a plan is live the endpoints are fixed: the executor works from
+  // the plan's own roots and POST /run rejects a mismatching pair, so an
+  // edit here could not take effect anyway. Paused counts as locked: the
+  // run is resumable and still owns the plan.
+  const pathsLocked = $derived(isBusy || isPaused);
   // Clear the "Pausing" transient label once the backend actually pauses (or stops).
   $effect(() => { if (isPaused || !isBusy) pausing = false; });
   const canPreview = $derived(!isBusy && !isPaused
@@ -325,6 +330,7 @@
         <input
           class="path-input"
           class:path-missing={srcExists === false}
+          disabled={pathsLocked}
           bind:value={$src}
           bind:this={srcInput}
           placeholder="/source/directory"
@@ -348,7 +354,7 @@
           </div>
         {/if}
       </div>
-      <button type="button" class="browse-btn" bind:this={srcBrowseBtn} onkeydown={cyclePathFocus} onclick={() => openBrowse('src')}>Browse…</button>
+      <button type="button" class="browse-btn" bind:this={srcBrowseBtn} disabled={pathsLocked} onkeydown={cyclePathFocus} onclick={() => openBrowse('src')}>Browse…</button>
     </div>
     <div class="path-group">
       <span class="path-label">DST</span>
@@ -356,6 +362,7 @@
         <input
           class="path-input"
           class:path-missing={dstExists === false}
+          disabled={pathsLocked}
           bind:value={$dst}
           bind:this={dstInput}
           placeholder="/destination/directory"
@@ -379,7 +386,7 @@
           </div>
         {/if}
       </div>
-      <button type="button" class="browse-btn" bind:this={dstBrowseBtn} onkeydown={cyclePathFocus} onclick={() => openBrowse('dst')}>Browse…</button>
+      <button type="button" class="browse-btn" bind:this={dstBrowseBtn} disabled={pathsLocked} onkeydown={cyclePathFocus} onclick={() => openBrowse('dst')}>Browse…</button>
     </div>
   </div>
 
@@ -549,6 +556,8 @@
     outline: none;
   }
   .path-input:focus { border-color: var(--accent-blue); }
+  /* Locked while a plan is live, matching the action buttons. */
+  .path-input:disabled { opacity: 0.5; cursor: not-allowed; }
   .path-input.path-missing { color: var(--accent-red); border-color: var(--accent-red); }
 
   .ac-dropdown {
@@ -590,7 +599,8 @@
     color: var(--text);
     white-space: nowrap;
   }
-  .browse-btn:hover { background: var(--hover); }
+  .browse-btn:not(:disabled):hover { background: var(--hover); }
+  .browse-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
   /* Row 3 */
   .action-btn {

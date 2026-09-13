@@ -399,8 +399,17 @@
   // stored plan against a destination the inputs no longer show. Plans
   // recovered after a reload (previewedSrc empty) rely on the server-side
   // endpoint check in POST /run instead.
+  //
+  // Never while busy: clearing the op list mid-run empties both panels and
+  // zeroes the progress denominator while the sync keeps going against the
+  // plan's own roots. TopBar locks the inputs during a run, so this is the
+  // backstop for a path arriving from anywhere else.
+  const planLocked = $derived(
+    previewing || running || ['previewing', 'running', 'paused'].includes($progress.status)
+  );
   $effect(() => {
     if (
+      !planLocked &&
       $planMeta.totalOps > 0 &&
       previewedSrc &&
       ($src !== previewedSrc || $dst !== previewedDst)
