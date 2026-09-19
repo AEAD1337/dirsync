@@ -2,6 +2,7 @@
   import ProgressBar from './ProgressBar.svelte';
   import { progress, scanState } from '../lib/store';
   import { fmtCount, formatBytes, formatDuration, formatEta } from '../lib/store';
+  import type { ProgressSnapshot } from '../lib/types';
 
   $: p = $progress;
   $: isPreviewing = $scanState.active;
@@ -16,8 +17,35 @@
 
   $: overallLabel = `${overallPct.toFixed(1)}%`;
 
-  // Show file bar only when a file is actively transferring
-  $: showFileBar = !!p.current_file;
+  // A file earns its own bar once what is left of it looks like more than
+  // FILE_BAR_SECS at the current speed. Estimated rather than timed, so a slow
+  // file gets its bar immediately instead of seconds in, and measured against
+  // the remaining bytes so a nearly finished file does not qualify.
+  const FILE_BAR_SECS = 3;
+  // No speed sample yet (the first file of a run): the estimate has no
+  // divisor, so fall back to plain size.
+  const FILE_BAR_COLD_BYTES = 50 * 1024 * 1024;
+
+  // The file the bar is currently shown for. Keeping it until the file changes
+  // is what stops a wobbling speed sample flickering the bar on and off.
+  let fileBarFile: string | null = null;
+
+  function updateFileBar(p: ProgressSnapshot) {
+    if (!p.current_file) {
+      fileBarFile = null;
+      return;
+    }
+    if (fileBarFile === p.current_file) return;
+    const remaining = Math.max(p.current_file_size - p.current_file_done, 0);
+    const bytesPerSec = p.speed_mbps * 1024 * 1024;
+    const slow = bytesPerSec > 0
+      ? remaining / bytesPerSec > FILE_BAR_SECS
+      : p.current_file_size >= FILE_BAR_COLD_BYTES;
+    if (slow) fileBarFile = p.current_file;
+  }
+
+  $: updateFileBar(p);
+  $: showFileBar = !!p.current_file && fileBarFile === p.current_file;
 
   $: remaining = p.eta_secs != null ? formatDuration(p.eta_secs) : '-';
   $: eta = p.eta_secs != null ? formatEta(p.eta_secs) : '-';

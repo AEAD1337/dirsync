@@ -1,10 +1,16 @@
 use crate::progress::{ProgressEvent, ProgressState, ScanPhase, SyncStatus};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::broadcast;
 
-const FILE_BAR_THRESHOLD: Duration = Duration::from_secs(3);
+/// A file earns its own bar once it looks like it will take longer than this.
+/// Estimated from the measured transfer speed, not from wall-clock time: a
+/// slow file should get its bar right away rather than three seconds in.
+const FILE_BAR_SECS: f64 = 3.0;
+/// Fallback while no speed sample exists yet (the first file of a run): the
+/// estimate needs a divisor, so fall back to plain size.
+const FILE_BAR_COLD_BYTES: u64 = 50 * 1024 * 1024;
 const TICK: Duration = Duration::from_millis(100);
 
 pub struct CliUi {
@@ -118,7 +124,7 @@ impl CliUi {
         mut rx: broadcast::Receiver<ProgressEvent>,
     ) {
         // Local shadow state: updated from events, flushed to indicatif on tick only.
-        let mut file_started_at: Option<Instant> = None;
+        let mut file_active = false;
         let mut file_visible = false;
         let mut file_size: u64 = 0;
         let mut done: Option<SyncStatus> = None;
@@ -135,11 +141,11 @@ impl CliUi {
                     match result {
                         Ok(event) => match event {
                             ProgressEvent::FileStarted { size, .. } => {
-                                file_started_at = Some(Instant::now());
+                                file_active = true;
                                 file_size = size;
                             }
                             ProgressEvent::FileDone { .. } => {
-                                file_started_at = None;
+                                file_active = false;
                             }
                             ProgressEvent::StatusChanged { status } => {
                                 match status {
@@ -162,10 +168,12 @@ impl CliUi {
                 }
 
                 _ = interval.tick() => {
-                    // Decide file bar visibility.
-                    let should_show = file_started_at
-                        .map(|t| t.elapsed() >= FILE_BAR_THRESHOLD)
-                        .unwrap_or(false);
+                    // Decide file bar visibility from what is left to move at
+                    // the current speed. Once shown, the bar stays up until the
+                    // file finishes: a wobbling speed sample must not make it
+                    // flicker on and off mid-file.
+                    let should_show = file_active
+                        && (file_visible || slow_enough(&progress, file_size));
 
                     if should_show && !file_visible {
                         self.file_bar.set_message(crate::fmt::fmt_bytes_styled(
@@ -243,6 +251,22 @@ impl CliUi {
         ));
         self.overall_bar.set_position(pct_10.min(1000));
     }
+}
+
+/// Will the rest of the current file take longer than FILE_BAR_SECS?
+///
+/// Measured against the *remaining* bytes, so a file that is nearly done does
+/// not keep claiming work it no longer has.
+fn slow_enough(progress: &Arc<ProgressState>, file_size: u64) -> bool {
+    let done = progress
+        .current_file_done
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let remaining = file_size.saturating_sub(done);
+    let bytes_per_sec = progress.speed_mbps() * 1_048_576.0;
+    if bytes_per_sec <= 0.0 {
+        return file_size >= FILE_BAR_COLD_BYTES;
+    }
+    remaining as f64 / bytes_per_sec > FILE_BAR_SECS
 }
 
 fn format_duration(secs: u64) -> String {
