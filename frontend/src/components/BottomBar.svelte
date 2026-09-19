@@ -74,14 +74,16 @@
       />
     {/if}
   </div>
-  <!-- Status bar order: Ops | Data | Elapsed | Remaining | ETA | Speed -->
+  <!-- Status bar order: Ops | Data | Elapsed | Remaining | ETA | Speed.
+       Each value sits in a fixed-width slot so a shorter or longer reading
+       never shifts the indicators to its right. -->
   <div class="indicators">
-    <span class="ind"><span class="ind-label">Ops</span> {p.ops_total > 0 ? `${fmtCount(p.ops_done)}/${fmtCount(p.ops_total)}` : '-'}</span>
-    <span class="ind"><span class="ind-label">Data</span> {p.total_bytes > 0 ? `${formatBytes(p.done_bytes)}/${formatBytes(p.total_bytes)}` : '-'}</span>
-    <span class="ind"><span class="ind-label">Elapsed</span> {formatDuration(p.elapsed_secs)}</span>
-    <span class="ind"><span class="ind-label">Remaining</span> {remaining}</span>
-    <span class="ind"><span class="ind-label">ETA</span> {eta}</span>
-    <span class="ind"><span class="ind-label">Speed</span> {p.speed_mbps.toFixed(1)} MB/s</span>
+    <span class="ind"><span class="ind-label">Ops</span><span class="ind-value ops">{p.ops_total > 0 ? `${fmtCount(p.ops_done)}/${fmtCount(p.ops_total)}` : '-'}</span></span>
+    <span class="ind"><span class="ind-label">Data</span><span class="ind-value data">{p.total_bytes > 0 ? `${formatBytes(p.done_bytes)}/${formatBytes(p.total_bytes)}` : '-'}</span></span>
+    <span class="ind"><span class="ind-label">Elapsed</span><span class="ind-value time">{formatDuration(p.elapsed_secs)}</span></span>
+    <span class="ind"><span class="ind-label">Remaining</span><span class="ind-value time">{remaining}</span></span>
+    <span class="ind"><span class="ind-label">ETA</span><span class="ind-value eta">{eta}</span></span>
+    <span class="ind"><span class="ind-label">Speed</span><span class="ind-value speed">{p.speed_mbps.toFixed(1)} MB/s</span></span>
   </div>
 </div>
 
@@ -105,7 +107,20 @@
     font-size: 11px;
     color: var(--text-muted);
     flex-wrap: wrap;
+    /* Same advance width for every digit: without it 1 is narrower than 0,
+       so even a same-length reading nudges its neighbours. */
+    font-variant-numeric: tabular-nums;
   }
   .ind { display: flex; gap: 4px; align-items: baseline; }
   .ind-label { font-weight: 600; color: var(--text); }
+  /* Widths cover the realistic worst case for each reading, so the row stays
+     still as values grow and shrink. A value longer than its slot (a job of
+     millions of ops, days of runtime) still grows rather than being clipped:
+     reserving for those would waste most of the bar most of the time. */
+  .ind-value { display: inline-block; }
+  .ind-value.ops { min-width: 13ch; }     /* 999,999/999,999 */
+  .ind-value.data { min-width: 17ch; }    /* 999.9 GB/999.9 GB */
+  .ind-value.time { min-width: 10ch; }    /* 9h 59m 59s */
+  .ind-value.eta { min-width: 8ch; }      /* Wed 10:47 */
+  .ind-value.speed { min-width: 11ch; }   /* 1000.0 MB/s */
 </style>
