@@ -11,7 +11,11 @@ const FILE_BAR_SECS: f64 = 3.0;
 /// Fallback while no speed sample exists yet (the first file of a run): the
 /// estimate needs a divisor, so fall back to plain size.
 const FILE_BAR_COLD_BYTES: u64 = 50 * 1024 * 1024;
-const TICK: Duration = Duration::from_millis(100);
+const TICK: Duration = Duration::from_millis(200);
+/// Redraws per second. The default (20) repaints a full-width line often
+/// enough to shimmer on Windows consoles, and these numbers are perfectly
+/// readable at 5.
+const DRAW_HZ: u8 = 5;
 
 pub struct CliUi {
     _multi: MultiProgress,
@@ -27,15 +31,16 @@ impl Default for CliUi {
 
 impl CliUi {
     pub fn new() -> Self {
-        let multi = MultiProgress::new();
+        let multi =
+            MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::stderr_with_hz(DRAW_HZ));
 
+        // The file bar stays registered for the whole run and is blanked
+        // rather than detached: swapping its draw target changed the block
+        // between one and two lines mid-run, and a line-clearing renderer
+        // redrawing a block that keeps changing height is what makes the
+        // output shimmer.
         let file_bar = multi.add(ProgressBar::new(100));
-        file_bar.set_style(
-            ProgressStyle::with_template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos:>3}% {msg}")
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        file_bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        file_bar.set_style(blank_style());
 
         let overall_bar = multi.add(ProgressBar::new(1000));
         overall_bar.set_style(
@@ -182,10 +187,10 @@ impl CliUi {
                             Some(crate::fmt::UNIT_MB),
                             crate::fmt::UNIT_TB,
                         ));
-                        self.file_bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+                        self.file_bar.set_style(file_bar_style());
                         file_visible = true;
                     } else if !should_show && file_visible {
-                        self.file_bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+                        self.file_bar.set_style(blank_style());
                         self.file_bar.set_position(0);
                         file_visible = false;
                     }
@@ -266,6 +271,19 @@ impl CliUi {
         ));
         self.overall_bar.set_position(pct_10.min(1000));
     }
+}
+
+/// The file bar as drawn while a file is worth showing.
+fn file_bar_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos:>3}% {msg}")
+        .unwrap()
+        .progress_chars("=>-")
+}
+
+/// The same bar rendered as an empty line, holding its row in the block so
+/// the rendered height never changes.
+fn blank_style() -> ProgressStyle {
+    ProgressStyle::with_template("").unwrap()
 }
 
 /// Auto-scaled bytes at one decimal, matching the GUI's status bar.
