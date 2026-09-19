@@ -1,6 +1,6 @@
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-1.1.5-blue?style=flat)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
+[![Version](https://img.shields.io/badge/Version-1.1.6-blue?style=flat)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
 [![Release](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml) &nbsp;
 [![Audit](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml) &nbsp;
 [![CodeQL](https://github.com/AEAD1337/dirsync/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/AEAD1337/dirsync/security/code-scanning) &nbsp;
