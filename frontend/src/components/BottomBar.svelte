@@ -74,9 +74,10 @@
       />
     {/if}
   </div>
-  <!-- Status bar order: Ops | Elapsed | Remaining | ETA | Speed -->
+  <!-- Status bar order: Ops | Data | Elapsed | Remaining | ETA | Speed -->
   <div class="indicators">
     <span class="ind"><span class="ind-label">Ops</span> {p.ops_total > 0 ? `${fmtCount(p.ops_done)}/${fmtCount(p.ops_total)}` : '-'}</span>
+    <span class="ind"><span class="ind-label">Data</span> {p.total_bytes > 0 ? `${formatBytes(p.done_bytes)}/${formatBytes(p.total_bytes)}` : '-'}</span>
     <span class="ind"><span class="ind-label">Elapsed</span> {formatDuration(p.elapsed_secs)}</span>
     <span class="ind"><span class="ind-label">Remaining</span> {remaining}</span>
     <span class="ind"><span class="ind-label">ETA</span> {eta}</span>

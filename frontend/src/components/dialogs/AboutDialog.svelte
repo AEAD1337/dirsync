@@ -34,6 +34,14 @@
         <tr><td>Version</td><td>{version}</td></tr>
         <tr><td>Build time</td><td>{buildTime}</td></tr>
         <tr><td>License</td><td>GPL-3.0-only</td></tr>
+        <tr>
+          <td>Source</td>
+          <td>
+            <a href="https://github.com/AEAD1337/dirsync" target="_blank" rel="noopener">
+              github.com/AEAD1337/dirsync
+            </a>
+          </td>
+        </tr>
       </tbody>
     </table>
     <button onclick={onclose}>Close</button>
@@ -64,6 +72,8 @@
   table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
   td { padding: 4px 8px; font-size: 13px; color: var(--text); }
   td:first-child { font-weight: 600; color: var(--text-muted); width: 100px; }
+  td a { color: var(--accent-blue); text-decoration: none; }
+  td a:hover { text-decoration: underline; }
   button {
     background: var(--accent-blue);
     color: #fff;
