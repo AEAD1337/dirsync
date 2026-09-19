@@ -263,9 +263,10 @@ impl CliUi {
             "-".to_owned()
         };
 
-        // Status bar order: Ops | Data | Elapsed | Remaining | ETA | Speed
+        // Status bar order: Ops | Data | Elapsed | Remaining | ETA | Speed.
+        // Each reading carries its own unit or suffix instead of a label.
         self.overall_bar.set_message(format!(
-            "Ops: {}/{ops_total_fmt}  Data: {data_str}  Elapsed: {elapsed_str}  Remaining: {remaining_str}  {eta_str}  Speed: {speed:.1} MB/s",
+            "{}/{ops_total_fmt} Ops | {data_str} | {elapsed_str} | {remaining_str} remain | {eta_str} | {speed:.1} MB/s",
             crate::fmt::fmt_count(ops_done),
             ops_total_fmt = crate::fmt::fmt_count(ops_total),
         ));
