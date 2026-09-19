@@ -124,9 +124,9 @@ fn plan_log_message(plan: &crate::sync::planner::SyncPlan) -> String {
         parts.join(". ")
     };
     if plan.total_bytes > 0 {
-        format!("{line}: {}", format_bytes(plan.total_bytes))
+        format!("{line}. {} to transfer.", format_bytes(plan.total_bytes))
     } else {
-        line
+        format!("{line}.")
     }
 }
 
