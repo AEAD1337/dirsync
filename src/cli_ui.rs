@@ -243,14 +243,34 @@ impl CliUi {
             .load(std::sync::atomic::Ordering::Relaxed);
         let pct_10 = (progress.overall_pct().min(100.0) * 10.0) as u64;
 
-        // Status bar order: Ops | Elapsed | Remaining | ETA | Speed
+        // Both totals carry the virtual token every non-copy op is credited
+        // with, so they match the plan summary's "N to transfer" rather than
+        // counting file bytes alone.
+        let done_bytes = progress
+            .done_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_bytes = progress
+            .total_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let data_str = if total_bytes > 0 {
+            format!("{}/{}", fmt_data(done_bytes), fmt_data(total_bytes))
+        } else {
+            "-".to_owned()
+        };
+
+        // Status bar order: Ops | Data | Elapsed | Remaining | ETA | Speed
         self.overall_bar.set_message(format!(
-            "Ops: {}/{ops_total_fmt}  Elapsed: {elapsed_str}  Remaining: {remaining_str}  {eta_str}  Speed: {speed:.1} MB/s",
+            "Ops: {}/{ops_total_fmt}  Data: {data_str}  Elapsed: {elapsed_str}  Remaining: {remaining_str}  {eta_str}  Speed: {speed:.1} MB/s",
             crate::fmt::fmt_count(ops_done),
             ops_total_fmt = crate::fmt::fmt_count(ops_total),
         ));
         self.overall_bar.set_position(pct_10.min(1000));
     }
+}
+
+/// Auto-scaled bytes at one decimal, matching the GUI's status bar.
+fn fmt_data(bytes: u64) -> String {
+    crate::fmt::fmt_bytes_styled(bytes, Some(1), None, crate::fmt::UNIT_TB)
 }
 
 /// Will the rest of the current file take longer than FILE_BAR_SECS?
