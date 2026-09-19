@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 /// Virtual byte weight credited to every non-Copy/Overwrite op so that moves,
 /// deletes, mkdirs, etc. advance the overall progress bar.
-pub(super) const OP_TOKEN_BYTES: u64 = 8 * 1024;
+pub(super) const OP_TOKEN_BYTES: u64 = 128 * 1024;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum SyncOp {

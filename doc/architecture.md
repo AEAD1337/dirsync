@@ -128,7 +128,7 @@ Counters (`copy_count`, `overwrite_count`, `move_count`, `delete_count`, `identi
 
 `total_bytes` is the primary progress-bar denominator. It includes:
 - actual file bytes for every `Copy` and `Overwrite` op
-- a fixed 8 KB virtual token (`OP_TOKEN_BYTES`) for every other op (`Move`, `Delete`, `MkDir`, `RmDir`, `Symlink`, `TouchMtime`, `CaseRename`)
+- a fixed 128 KB virtual token (`OP_TOKEN_BYTES`) for every other op (`Move`, `Delete`, `MkDir`, `RmDir`, `Symlink`, `TouchMtime`, `CaseRename`)
 
 This ensures all operation types advance the overall progress bar, not just file copies.
 
@@ -151,7 +151,7 @@ Ops are partitioned by type and executed in fixed phase order:
 
 A safety gate at the start of `execute()` verifies every write target is inside `dst_root` before any op runs.
 
-Every non-Copy/Overwrite op that completes successfully calls `progress.record_bytes(OP_TOKEN_BYTES)` to credit its 8 KB token, keeping `done_bytes / total_bytes` consistent as the single progress metric throughout the run.
+Every non-Copy/Overwrite op that completes successfully calls `progress.record_bytes(OP_TOKEN_BYTES)` to credit its 128 KB token, keeping `done_bytes / total_bytes` consistent as the single progress metric throughout the run.
 
 ---
 
