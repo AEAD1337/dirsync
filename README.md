@@ -36,7 +36,7 @@ Available as both a CLI tool and an optional local web GUI. Runs on Windows, mac
 ### CLI
 ```
 .\dirsync.exe D:\dirsync\SRC\ D:\dirsync\DST\
-Drive detection: SRC=SSD, DST=SSD → parallel I/O
+Drive detection: SRC:SSD, DST:SSD → parallel I/O
 copy=1 overwrite=0 move=2 delete=1 symlink=0 identical=1 touch=0 (24.0 KB to transfer)
   [========================================] 100% Done
 ```

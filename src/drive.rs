@@ -68,7 +68,7 @@ pub fn probe(src: &Path, dst: &Path) -> (DriveProfile, String) {
         "parallel I/O"
     };
     let msg = format!(
-        "Drive detection: SRC={}, DST={} \u{2192} {mode_label}",
+        "Drive detection: SRC:{}, DST:{} \u{2192} {mode_label}",
         src_kind.label(),
         dst_kind.label(),
     );
