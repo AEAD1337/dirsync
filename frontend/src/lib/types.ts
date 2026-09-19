@@ -8,6 +8,15 @@ export interface AppConfig {
   theme: Theme;
 }
 
+// The user-editable part of AppConfig. last_src/last_dst are recorded by the
+// server on every preview and are not accepted here: sending the whole config
+// back used to regress them to whatever the page loaded with.
+export interface ConfigPatch {
+  port?: number;
+  exclude_patterns?: string[];
+  theme?: Theme;
+}
+
 export type SyncStatus =
   | 'idle'
   | 'previewing'
@@ -16,7 +25,7 @@ export type SyncStatus =
   | 'done'
   | 'cancelled';
 
-export type Badge = '+' | '–' | '→' | '↻' | '⇢' | '!';
+export type Badge = '+' | '–' | '→' | '↻' | '⇢' | '~' | '!';
 
 export type LogLevel = 'info' | 'warning' | 'error';
 
@@ -27,7 +36,7 @@ export interface LogEntry {
 }
 
 export interface OpEntry {
-  kind: 'copy' | 'overwrite' | 'move' | 'delete' | 'dir-rename' | 'case-rename' | 'symlink';
+  kind: 'copy' | 'overwrite' | 'move' | 'delete' | 'dir-rename' | 'case-rename' | 'symlink' | 'touch';
   rel_path: string;
   size: number;
   badge: Badge;
@@ -45,7 +54,6 @@ export interface PlanSummary {
   total_bytes: number;
   total_ops: number;
   ops: OpEntry[];
-  src_dir_sizes: Record<string, number>;
 }
 
 export interface ProgressSnapshot {

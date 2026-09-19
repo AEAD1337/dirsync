@@ -47,22 +47,6 @@
   let srcHighlight = $state(-1);
   let dstHighlight = $state(-1);
 
-  // Refs for the 4 path-row focusable elements (SRC input → SRC Browse → DST input → DST Browse).
-  let srcInput: HTMLInputElement = $state(undefined as any);
-  let srcBrowseBtn: HTMLButtonElement = $state(undefined as any);
-  let dstInput: HTMLInputElement = $state(undefined as any);
-  let dstBrowseBtn: HTMLButtonElement = $state(undefined as any);
-
-  function cyclePathFocus(e: KeyboardEvent) {
-    if (e.key !== 'Tab') return;
-    const elements = [srcInput, srcBrowseBtn, dstInput, dstBrowseBtn];
-    const idx = elements.indexOf(e.target as HTMLInputElement);
-    if (idx === -1) return;
-    e.preventDefault();
-    e.stopPropagation(); // prevent App.svelte's window handler from switching panels
-    elements[(idx + 1) % elements.length].focus();
-  }
-
   let statTimers: Record<string, ReturnType<typeof setTimeout>> = {};
   let completeTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
@@ -172,12 +156,11 @@
       e.preventDefault();
       pickCompletion(completions[highlight], side);
     } else if (e.key === 'Tab') {
+      // Tab confirms a highlighted completion; otherwise the browser's own
+      // tab order runs, which is the only keyboard route to the action row.
       if (highlight >= 0 && completions.length > 0) {
         e.preventDefault();
         pickCompletion(completions[highlight], side);
-        // don't also cycle focus: user just confirmed a completion
-      } else {
-        cyclePathFocus(e);
       }
     } else if (e.key === 'Escape') {
       close();
@@ -280,13 +263,13 @@
   async function toggleDark() {
     const newDark = !$isDark;
     isDark.set(newDark);
-    const updated = { ...$config, theme: (newDark ? 'dark' : 'light') as import('../lib/types').Theme };
-    config.set(updated);
+    const theme = (newDark ? 'dark' : 'light') as import('../lib/types').Theme;
+    config.update(c => ({ ...c, theme }));
     menuOpen = false;
-    // Persist, or the choice is lost on restart: the store alone is not
-    // written back to config.toml by anything else.
+    // Persist just the theme: the server merges it and owns the rest (the
+    // last-used paths in particular, which a whole-config PUT used to reset).
     try {
-      await api.putConfig(updated);
+      config.set(await api.putConfig({ theme }));
     } catch (err) {
       console.error('Could not save theme:', err);
     }
@@ -312,7 +295,7 @@
       {#if menuOpen}
         <div class="backdrop" role="presentation" onclick={closeMenu}></div>
         <div class="dropdown">
-          <button type="button" onclick={async () => { menuOpen = false; await api.shutdown().catch(() => {}); window.close(); }}>Close</button>
+          <button type="button" onclick={async () => { menuOpen = false; await api.shutdown().catch(() => {}); }}>Close</button>
           <button type="button"onclick={toggleDark}>{$isDark ? '☀ Light mode' : '☾ Dark mode'}</button>
           <button type="button" onclick={() => { menuOpen = false; onshowLog(); }}>Log</button>
           <button type="button"onclick={() => { menuOpen = false; onshowLicenses(); }}>Licenses</button>
@@ -332,7 +315,6 @@
           class:path-missing={srcExists === false}
           disabled={pathsLocked}
           bind:value={$src}
-          bind:this={srcInput}
           placeholder="/source/directory"
           autocomplete="off"
           oninput={() => onPathInput('src')}
@@ -354,7 +336,7 @@
           </div>
         {/if}
       </div>
-      <button type="button" class="browse-btn" bind:this={srcBrowseBtn} disabled={pathsLocked} onkeydown={cyclePathFocus} onclick={() => openBrowse('src')}>Browse…</button>
+      <button type="button" class="browse-btn" disabled={pathsLocked} onclick={() => openBrowse('src')}>Browse…</button>
     </div>
     <div class="path-group">
       <span class="path-label">DST</span>
@@ -364,7 +346,6 @@
           class:path-missing={dstExists === false}
           disabled={pathsLocked}
           bind:value={$dst}
-          bind:this={dstInput}
           placeholder="/destination/directory"
           autocomplete="off"
           oninput={() => onPathInput('dst')}
@@ -386,7 +367,7 @@
           </div>
         {/if}
       </div>
-      <button type="button" class="browse-btn" bind:this={dstBrowseBtn} disabled={pathsLocked} onkeydown={cyclePathFocus} onclick={() => openBrowse('dst')}>Browse…</button>
+      <button type="button" class="browse-btn" disabled={pathsLocked} onclick={() => openBrowse('dst')}>Browse…</button>
     </div>
   </div>
 

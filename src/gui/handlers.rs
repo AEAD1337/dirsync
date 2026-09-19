@@ -14,17 +14,44 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<AppConfig> {
     Json(state.config.read().unwrap().clone())
 }
 
+/// The user-editable subset of `AppConfig`. `last_src`/`last_dst` are owned
+/// by the server (`post_preview` records them) and are deliberately absent:
+/// a whole-config PUT built from the client's mount-time snapshot used to
+/// regress them after any theme toggle or exclusion prompt.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ConfigPatch {
+    pub port: Option<u16>,
+    pub exclude_patterns: Option<Vec<String>>,
+    pub theme: Option<crate::config::Theme>,
+}
+
 pub async fn put_config(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<AppConfig>,
+    Json(patch): Json<ConfigPatch>,
 ) -> Result<Json<AppConfig>, (StatusCode, String)> {
-    if let Err(e) = crate::config::validate_port(body.port) {
+    if let Some(port) = patch.port
+        && let Err(e) = crate::config::validate_port(port)
+    {
         return Err((StatusCode::BAD_REQUEST, e));
     }
-    body.save()
+    let merged = {
+        let mut cfg = state.config.write().unwrap();
+        if let Some(port) = patch.port {
+            cfg.port = port;
+        }
+        if let Some(patterns) = patch.exclude_patterns {
+            cfg.exclude_patterns = patterns;
+        }
+        if let Some(theme) = patch.theme {
+            cfg.theme = theme;
+        }
+        cfg.clone()
+    };
+    merged
+        .save()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    *state.config.write().unwrap() = body.clone();
-    Ok(Json(body))
+    Ok(Json(merged))
 }
 
 // ---------- Preview ----------
@@ -47,7 +74,6 @@ pub struct PlanSummary {
     pub total_bytes: u64,
     pub total_ops: usize,
     pub ops: Vec<OpEntry>,
-    pub src_dir_sizes: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -329,7 +355,17 @@ pub fn plan_to_summary(plan: &SyncPlan) -> PlanSummary {
                 hash: None,
                 from_path: Some(rel(from)),
             }),
-            _ => None,
+            // A touch writes metadata to an existing user file, so unlike
+            // MkDir/RmDir it gets a row: the preview must show every write.
+            SyncOp::TouchMtime { dst, .. } => Some(OpEntry {
+                kind: "touch".into(),
+                rel_path: rel(dst),
+                size: 0,
+                badge: "~".into(),
+                hash: None,
+                from_path: None,
+            }),
+            SyncOp::MkDir { .. } | SyncOp::RmDir { .. } => None,
         })
         .collect();
 
@@ -346,7 +382,6 @@ pub fn plan_to_summary(plan: &SyncPlan) -> PlanSummary {
         total_bytes: plan.total_bytes,
         total_ops,
         ops,
-        src_dir_sizes: plan.src_dir_sizes.clone(),
     }
 }
 
@@ -457,7 +492,8 @@ pub async fn post_run(
     let cancel_rx = state.cancel_rx();
     let dry_run = body.dry_run;
 
-    tokio::spawn(async move {
+    let task_state = state.clone();
+    let handle = tokio::spawn(async move {
         let skip_log = engine
             .run(plan, progress.clone(), dry_run, pause_rx, cancel_rx)
             .await;
@@ -479,7 +515,17 @@ pub async fn post_run(
                 );
             }
         }
+        // A plan that ran to completion is consumed: a second Run would redo
+        // every copy and fail every Delete/Move against the mirrored tree.
+        // A cancelled or dry run keeps it, so the user can resume or run for
+        // real without another preview.
+        if !dry_run && *progress.status.read().unwrap() == crate::progress::SyncStatus::Done {
+            *task_state.last_plan.write().unwrap() = None;
+        }
     });
+    // Kept so shutdown can wait for the executor instead of dropping it
+    // between two ops (see AppState::request_shutdown).
+    *state.run_task.lock().unwrap() = Some(handle);
 
     Ok(StatusCode::ACCEPTED)
 }
@@ -500,15 +546,9 @@ pub async fn post_cancel(State(state): State<Arc<AppState>>) -> StatusCode {
 }
 
 pub async fn post_shutdown(State(state): State<Arc<AppState>>) -> StatusCode {
-    // Notify all WebSocket clients so they can close their tab.
-    state
-        .progress
-        .emit(crate::progress::ProgressEvent::Shutdown);
-    // Trigger server shutdown after a short delay to let the WS message fly.
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = state.shutdown_tx.send(true);
-    });
+    // Cancels any run, notifies the clients, then flips the shutdown watch;
+    // spawned so the 204 leaves before the server stops accepting.
+    tokio::spawn(async move { state.request_shutdown().await });
     StatusCode::NO_CONTENT
 }
 
@@ -704,7 +744,8 @@ fn list_root_entries() -> Vec<String> {
 pub async fn get_system(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "path_sep": std::path::MAIN_SEPARATOR.to_string(),
-        "auto_preview": state.auto_preview,
+        // One-shot: a reload after the first load must not re-scan both trees.
+        "auto_preview": state.take_auto_preview(),
     }))
 }
 
@@ -832,7 +873,6 @@ mod tests {
             src_root: std::path::PathBuf::from("/src"),
             dst_root: std::path::PathBuf::from("/dst"),
             hdd: false,
-            src_dir_sizes: std::collections::HashMap::new(),
             dir_blocked_targets: vec![],
         }
     }

@@ -68,9 +68,6 @@ pub struct SyncPlan {
     /// Carried on the plan so `post_run` can build the execute engine without
     /// re-reading config or re-detecting the drive type.
     pub hdd: bool,
-    /// Aggregate size (bytes) of all SRC files under each directory, keyed by
-    /// forward-slash relative path. Used by the GUI to show directory sizes.
-    pub src_dir_sizes: HashMap<String, u64>,
     /// Write targets (absolute) that DST currently holds as a *directory*,
     /// per the preview's DST walk. The executor clears these by hoisting
     /// their Delete/RmDir ops before any write phase; flagging them here
@@ -501,16 +498,6 @@ pub fn plan(
         .cloned()
         .collect();
 
-    // Aggregate SRC file sizes per directory for GUI display.
-    let mut src_dir_sizes: HashMap<String, u64> = HashMap::new();
-    for entry in &match_output.matched {
-        let rel = crate::paths::to_slash(&entry.src.rel_path);
-        let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
-        for i in 1..parts.len() {
-            *src_dir_sizes.entry(parts[..i].join("/")).or_default() += entry.src.size;
-        }
-    }
-
     let mut plan = SyncPlan {
         ops,
         total_bytes: 0,
@@ -524,7 +511,6 @@ pub fn plan(
         src_root: src_root.to_path_buf(),
         dst_root: dst_root.to_path_buf(),
         hdd,
-        src_dir_sizes,
         dir_blocked_targets,
     };
     plan.recount();
@@ -597,7 +583,6 @@ mod tests {
             src_root: PathBuf::from("/src"),
             dst_root: PathBuf::from("/dst"),
             hdd: false,
-            src_dir_sizes: HashMap::new(),
             dir_blocked_targets: vec![],
         }
     }

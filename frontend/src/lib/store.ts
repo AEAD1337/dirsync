@@ -47,8 +47,7 @@ export const collapsedDirs = writable(new Set<string>());
 export const planMeta = writable<{
   totalOps: number;
   totalBytes: number;
-  srcDirSizes: Record<string, number>;
-}>({ totalOps: 0, totalBytes: 0, srcDirSizes: {} });
+}>({ totalOps: 0, totalBytes: 0 });
 
 // Scan progress state during Preview
 export const scanState = writable<{

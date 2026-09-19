@@ -108,6 +108,7 @@
     if (badge === '–') return 'badge-del';
     if (badge === '→') return 'badge-move';
     if (badge === '⇢') return 'badge-link';
+    if (badge === '~') return 'badge-touch';
     return 'badge-err';
   }
 
@@ -120,6 +121,7 @@
       'dir-rename': 'Rename directory',
       'case-rename': 'Rename (case only)',
       symlink:      'Create symlink in destination',
+      touch:        'Update timestamp in destination',
     };
     const base = descs[op.kind] ?? op.kind;
     if ((op.kind === 'move' || op.kind === 'dir-rename') && op.from_path) {
@@ -410,6 +412,7 @@
   .badge-del  { color: var(--accent-red); }
   .badge-move { color: var(--accent-blue); }
   .badge-link { color: var(--accent-yellow); }
+  .badge-touch { color: var(--text-muted); }
   .badge-err  { color: var(--accent-red); }
 
   .row-path {

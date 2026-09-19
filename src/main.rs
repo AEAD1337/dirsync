@@ -26,8 +26,12 @@ async fn main() -> Result<()> {
 
     let args = cli::parse();
 
-    // Load config, merge CLI excludes
-    let mut config = config::AppConfig::load();
+    // Load config (from --config when given), merge CLI excludes. The loaded
+    // path travels with the config so every later save() lands in the same file.
+    let mut config = match &args.config {
+        Some(path) => config::AppConfig::load_from(path),
+        None => config::AppConfig::load(),
+    };
     if !args.exclude.is_empty() {
         config = config.with_extra_excludes(args.exclude);
     }
@@ -72,34 +76,42 @@ async fn main() -> Result<()> {
     // Validation resolves the pair internally; the engine keeps the paths the
     // user typed, matching the GUI and keeping `\\?\`-prefixed canonical forms
     // out of every log line and error message.
-    if let Err(e) = paths::validate_endpoints(&src, &dst, args.yolo) {
-        bail!("{e}");
-    }
+    let (canon_src, canon_dst) = match paths::validate_endpoints(&src, &dst, args.yolo) {
+        Ok(pair) => pair,
+        Err(e) => bail!("{e}"),
+    };
 
     let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (progress, _) = progress::new_progress_channel();
 
     // Ctrl-C → cancel; a second Ctrl-C force-exits. Registering the handler
     // disables the default terminate disposition for the rest of the process
     // lifetime, so the task must keep listening: a one-shot forward would
-    // leave every later Ctrl-C silently discarded.
+    // leave every later Ctrl-C silently discarded. The notice goes through
+    // the progress channel so the CLI UI can print it above its bars instead
+    // of eprintln! splitting a repaint.
     {
         let cancel_tx2 = cancel_tx.clone();
+        let progress = progress.clone();
         tokio::spawn(async move {
             tokio::signal::ctrl_c().await.ok();
             let _ = cancel_tx2.send(true);
-            eprintln!("\nCancelling… (press Ctrl-C again to force quit)");
+            progress.emit_log(
+                progress::LogLevel::Warning,
+                "Cancelling... (press Ctrl-C again to force quit)".to_owned(),
+            );
             tokio::signal::ctrl_c().await.ok();
             std::process::exit(130);
         });
     }
 
     // Probed here rather than inside preview() so the message prints before
-    // the walk starts: the CLI progress UI doesn't render log events.
-    let (drives, drive_msg) = drive::probe(&src, &dst);
+    // the walk starts. The canonical forms are used so a relative path still
+    // resolves to its drive; the engine keeps the paths the user typed.
+    let (drives, drive_msg) = drive::probe(&canon_src, &canon_dst);
     println!("{drive_msg}");
 
-    let (progress, _) = progress::new_progress_channel();
     let config = Arc::new(config);
     let engine = sync::SyncEngine::new(src, dst, config).with_drives(drives);
 
@@ -129,10 +141,20 @@ async fn main() -> Result<()> {
         async move { engine.run(plan, progress, false, pause_rx, cancel_rx).await }
     });
 
-    ui.run(progress, rx).await;
+    ui.run(progress.clone(), rx).await;
 
     let skip_log = sync_handle.await?;
     skip_log.print_summary();
+
+    // Exit status is the contract with scripts: a cancelled run and a run
+    // that skipped files must both be distinguishable from success.
+    let cancelled = *progress.status.read().unwrap() == progress::SyncStatus::Cancelled;
+    if cancelled {
+        std::process::exit(130);
+    }
+    if !skip_log.is_empty() {
+        std::process::exit(1);
+    }
 
     Ok(())
 }

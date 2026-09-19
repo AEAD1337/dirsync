@@ -26,7 +26,7 @@ Returns the current `AppConfig`.
 `theme` is one of `"light"`, `"dark"`, `"system"`. `last_src` / `last_dst` are `null` when not yet set.
 
 #### `PUT /api/v1/config`
-Saves a new config. Body: same shape as the GET response. Returns the saved config or `500`.
+Partial update. Body: any subset of `port`, `exclude_patterns`, `theme`; absent fields keep their current value. `last_src` / `last_dst` are not accepted: the server records them on every preview, and a whole-config PUT built from a stale client snapshot used to overwrite them. Returns the full merged config, `400` for a port outside 1024-65535, or `500` if the file could not be written.
 
 ---
 
@@ -61,7 +61,6 @@ Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no 
   "symlink_count": 0,
   "total_bytes": 1048576,
   "total_ops": 6,
-  "src_dir_sizes": { "photos": 983040, "photos/2024": 983040 },
   "ops": [
     {
       "kind": "copy",
@@ -87,16 +86,16 @@ Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no 
 }
 ```
 
-`kind` values: `"copy"`, `"overwrite"`, `"move"`, `"dir-rename"`, `"case-rename"`, `"delete"`, `"symlink"`. `MkDir`, `RmDir`, and `TouchMtime` ops are not included in the ops list (they are infrastructure; the GUI does not display them individually): but they **are** counted in `total_ops`, which is the whole plan's op count and therefore the same denominator the progress bar reports as `ops_total`. `total_ops` is consequently `>= ops.length`. `hash` is a hex-encoded SHA-256, present only when it was computed during matching. `from_path` is present only for `move`, `dir-rename`, and `case-rename`. `"case-rename"` is only emitted on Windows (NTFS case-only renames); `size` is always `0` for this kind.
+`kind` values: `"copy"`, `"overwrite"`, `"move"`, `"dir-rename"`, `"case-rename"`, `"delete"`, `"symlink"`, `"touch"`. A `touch` (badge `~`, `size` 0) is a timestamp correction on an existing DST file; it gets a row because it writes to a user file. `MkDir` and `RmDir` ops are not included in the ops list (they are infrastructure; the GUI does not display them individually): but they **are** counted in `total_ops`, which is the whole plan's op count and therefore the same denominator the progress bar reports as `ops_total`. `total_ops` is consequently `>= ops.length`. `hash` is a hex-encoded SHA-256, present only when it was computed during matching. `from_path` is present only for `move`, `dir-rename`, and `case-rename`. `"case-rename"` is only emitted on Windows (NTFS case-only renames); `size` is always `0` for this kind.
 
-`total_bytes` is the progress-bar denominator: it is the sum of actual file bytes for copy/overwrite ops **plus** an 8 KB virtual token per non-copy op (moves, deletes, mkdirs, rmdirs, symlinks, mtime touches). The token ensures all op types advance the progress bar, not just file copies.
+`total_bytes` is the progress-bar denominator: it is the sum of actual file bytes for copy/overwrite ops **plus** a 128 KB virtual token (`OP_TOKEN_BYTES`) per non-copy op (moves, deletes, mkdirs, rmdirs, symlinks, mtime touches). The token ensures all op types advance the progress bar, not just file copies.
 
 ---
 
 ### Run
 
 #### `POST /api/v1/run`
-Starts executing the last computed plan. Returns `202 Accepted`, or `409 Conflict` if a sync is already running, or `400 Bad Request` if no plan exists.
+Starts executing the last computed plan. Returns `202 Accepted`, or `409 Conflict` if a sync is already running, or `400 Bad Request` if no plan exists. A plan that ran to completion is dropped server-side: running again requires a new preview (a cancelled or dry run keeps it).
 
 Request:
 ```json
@@ -121,7 +120,7 @@ Toggles pause. Returns the new pause state:
 Cancels the current preview or run. Returns `204 No Content`.
 
 #### `POST /api/v1/shutdown`
-Emits a `shutdown` WebSocket event to all clients, waits 200 ms, then terminates the server process. Returns `204 No Content`.
+Sets the cancel flag (so an in-flight run stops at its next chunk or op), emits a `shutdown` WebSocket event to all clients, waits 200 ms, then stops the server; the process exits once the executor has written its final status. Returns `204 No Content`. The same sequence runs on SIGINT/SIGTERM and when the last client is gone.
 
 The server also shuts itself down when the last WebSocket client disconnects and none reconnects within 5 s (`CLIENT_GRACE` in `ws.rs`). The grace period is what distinguishes a page reload - back within a second - from a closed tab.
 
@@ -170,7 +169,7 @@ Returns platform metadata the frontend needs on startup.
 { "path_sep": "\\", "auto_preview": false }
 ```
 
-`auto_preview` is `true` when `--gui` was launched with both SRC and DST given as positional args *and* both already resolve to existing directories. There is no `--auto-preview` flag: it is derived in `main.rs`. The frontend uses it to fire a preview on load instead of waiting for the user.
+`auto_preview` is `true` when `--gui` was launched with both SRC and DST given as positional args *and* both already resolve to existing directories, and only on the first `GET /system` of the process: it is cleared once read, so a page reload does not re-scan both trees. There is no `--auto-preview` flag: it is derived in `main.rs`. The frontend uses it to fire a preview on load instead of waiting for the user.
 
 ---
 
@@ -237,7 +236,7 @@ Sent every 100 ms while the WebSocket connection is open. Provides a complete sn
   "status": "running"
 }
 ```
-`current_file` is `null` when no large-file copy is in progress. `eta_secs` is `null` when speed is too low to estimate. `status` mirrors the state machine values: `"idle"`, `"previewing"`, `"running"`, `"paused"`, `"done"`, `"cancelled"`. `total_bytes` includes 8 KB virtual tokens for non-copy ops (see plan `total_bytes` note above); overall progress is always `done_bytes / total_bytes`.
+`current_file` is `null` when no large-file copy is in progress. `eta_secs` is `null` when speed is too low to estimate. `status` mirrors the state machine values: `"idle"`, `"previewing"`, `"running"`, `"paused"`, `"done"`, `"cancelled"`. `total_bytes` includes 128 KB virtual tokens for non-copy ops (see plan `total_bytes` note above); overall progress is always `done_bytes / total_bytes`.
 
 #### `status_changed`
 Pushed on every status transition, as it happens.
@@ -280,7 +279,6 @@ Emitted when the preview plan is ready. Carries the full plan inline: no separat
   "symlink_count": 0,
   "total_bytes": 1048576,
   "total_ops": 8,
-  "src_dir_sizes": { "photos": 983040, "photos/2024": 983040 },
   "ops": [
     { "kind": "copy", "rel_path": "photos/2024/img001.jpg", "size": 983040, "badge": "+" },
     { "kind": "move", "rel_path": "archive/old.txt", "size": 0, "badge": "→", "from_path": "trash/old.txt" },

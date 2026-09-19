@@ -54,8 +54,11 @@ impl DriveProfile {
 /// On Windows, any failed TRIM query (UNC path, access denied, unsupported
 /// IOCTL) defaults to HDD. On other platforms, unknown types default to SSD.
 pub fn probe(src: &Path, dst: &Path) -> (DriveProfile, String) {
-    let src_kind = detect(src);
-    let dst_kind = detect(dst);
+    // Callers pass the paths the user typed (the engine keeps those for its
+    // messages). A relative path has no drive letter and no mount point, so
+    // resolve first: without this `dirsync . E:\backup` classified `.` as HDD.
+    let src_kind = detect(&crate::paths::canonicalize_or_partial(src));
+    let dst_kind = detect(&crate::paths::canonicalize_or_partial(dst));
     let profile = DriveProfile {
         src_hdd: src_kind == DriveKind::Hdd,
         dst_hdd: dst_kind == DriveKind::Hdd,
@@ -93,6 +96,8 @@ fn detect(path: &Path) -> DriveKind {
 #[cfg(windows)]
 fn drive_letter(path: &Path) -> Option<char> {
     let s = path.to_string_lossy();
+    // canonicalize() yields extended-length paths (`\\?\D:\...`).
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
     let mut chars = s.chars();
     let letter = chars.next()?;
     (letter.is_ascii_alphabetic() && chars.next() == Some(':')).then(|| letter.to_ascii_uppercase())
@@ -196,5 +201,28 @@ fn detect(path: &Path) -> DriveKind {
             DiskKind::SSD => DriveKind::Ssd,
             _ => DriveKind::Unknown,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The engine keeps the paths the user typed, so `probe` must resolve
+    /// them itself: a relative path has no drive letter and no mount point.
+    #[test]
+    fn probe_classifies_a_relative_path_like_its_absolute_form() {
+        let cwd = std::env::current_dir().unwrap();
+        let (relative, _) = probe(Path::new("."), Path::new("."));
+        let (absolute, _) = probe(&cwd, &cwd);
+        assert_eq!(relative, absolute);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn drive_letter_accepts_the_extended_length_prefix() {
+        assert_eq!(drive_letter(Path::new(r"\\?\D:\x")), Some('D'));
+        assert_eq!(drive_letter(Path::new(r"d:\x")), Some('D'));
+        assert_eq!(drive_letter(Path::new(r"photos\")), None);
     }
 }

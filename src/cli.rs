@@ -50,6 +50,12 @@ EXCLUDE PATTERNS:
     whole relative path. `*.tmp` and `node_modules` work; a pattern containing
     a separator (`build/temp`) can never match. Excluding a nested directory
     means naming the directory itself.
+
+EXIT STATUS:
+    0    Success, nothing to do, or dry run
+    1    Run finished but one or more files failed and were skipped
+    2    Usage error
+    130  Cancelled with Ctrl-C
 ";
 
 /// Print the same help text `-h` / `--help` produces.
@@ -58,7 +64,23 @@ pub fn print_help() {
 }
 
 pub fn parse() -> Args {
-    parse_from(lexopt::Parser::from_env())
+    let args = parse_from(lexopt::Parser::from_env());
+    if let Err(e) = validate(&args) {
+        eprintln!("Error: {e}");
+        std::process::exit(2);
+    }
+    args
+}
+
+/// Cross-flag checks lexopt cannot express. Kept separate from `parse_from`
+/// so the process-exiting wrapper stays thin and this stays testable.
+pub(crate) fn validate(args: &Args) -> Result<(), String> {
+    if args.gui && args.dry_run {
+        return Err(
+            "--dry-run has no effect with --gui: the GUI previews before every run".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn parse_from(mut parser: lexopt::Parser) -> Args {
@@ -281,6 +303,15 @@ mod tests {
     }
 
     #[test]
+    fn test_gui_with_dry_run_is_rejected() {
+        let args = parse_args(&["--gui", "--dry-run"]);
+        let err = validate(&args).unwrap_err();
+        assert!(err.contains("--dry-run"), "got: {err}");
+        assert!(validate(&parse_args(&["--gui"])).is_ok());
+        assert!(validate(&parse_args(&["-n", "/a", "/b"])).is_ok());
+    }
+
+    #[test]
     fn test_help_text_documents_every_option() {
         // print_help and -h share one string, so asserting on HELP covers both.
         print_help();
@@ -297,5 +328,6 @@ mod tests {
             assert!(HELP.contains(flag), "{flag} missing from the help text");
         }
         assert!(HELP.contains("completions <SHELL>"));
+        assert!(HELP.contains("EXIT STATUS"));
     }
 }

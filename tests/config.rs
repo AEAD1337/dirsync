@@ -16,6 +16,7 @@ fn test_toml_round_trip() {
         last_src: Some("/tmp/src".into()),
         last_dst: Some("/tmp/dst".into()),
         theme: Theme::Dark,
+        path: None,
     };
     let serialized = toml::to_string_pretty(&cfg).unwrap();
     let deserialized: AppConfig = toml::from_str(&serialized).unwrap();

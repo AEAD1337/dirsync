@@ -1,4 +1,4 @@
-import type { AppConfig, BrowseEntry, LogEntry, PlanSummary, WsEvent } from './types';
+import type { AppConfig, BrowseEntry, ConfigPatch, LogEntry, PlanSummary, WsEvent } from './types';
 
 const BASE = '/api/v1';
 
@@ -33,7 +33,8 @@ async function request<T>(
 
 export const api = {
   getConfig: () => request<AppConfig>('GET', '/config'),
-  putConfig: (cfg: AppConfig) => request<AppConfig>('PUT', '/config', cfg),
+  // Partial update; the server merges and returns the full config.
+  putConfig: (patch: ConfigPatch) => request<AppConfig>('PUT', '/config', patch),
 
   preview: (src: string, dst: string, excludes: string[]) =>
     request<void>('POST', '/preview', { src, dst, excludes }),

@@ -94,6 +94,10 @@ Subcommands:
 Exclude patterns match individual path components, not the whole relative
 path: `*.tmp` and `node_modules` work, `build/temp` never matches.
 
+Exit status: `0` success, nothing to do, or dry run; `1` the run finished but
+one or more files failed and were skipped (listed on stderr); `2` usage error;
+`130` cancelled with Ctrl-C.
+
 **Safety checks**
 
 Both the CLI and the GUI refuse a sync when:
@@ -155,6 +159,9 @@ last_dst = "/path/to/dst"
 ```
 
 CLI flags override config values for that run but do not write back to the file.
+`--config <PATH>` reads a different file instead, and in GUI mode every save
+(last-used paths, theme, exclusions) goes back to that file. A file that does
+not parse is kept as `config.toml.bad` and replaced with defaults.
 
 ## How it works
 

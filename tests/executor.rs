@@ -3,7 +3,6 @@ use dirsync::progress::{SyncStatus, new_progress_channel};
 use dirsync::sync::SyncEngine;
 use dirsync::sync::executor::{ExecuteOptions, execute};
 use dirsync::sync::planner::{SyncOp, SyncPlan};
-use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +23,6 @@ fn bare_plan(dst_root: std::path::PathBuf, ops: Vec<SyncOp>) -> SyncPlan {
         src_root: std::path::PathBuf::from("/src"),
         dst_root,
         hdd: false,
-        src_dir_sizes: HashMap::new(),
         dir_blocked_targets: vec![],
     }
 }

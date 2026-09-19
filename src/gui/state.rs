@@ -1,10 +1,12 @@
 use crate::config::AppConfig;
-use crate::progress::{LogEntry, ProgressState, new_progress_channel};
+use crate::progress::{LogEntry, ProgressEvent, ProgressState, new_progress_channel};
 use crate::sync::planner::SyncPlan;
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
@@ -14,8 +16,12 @@ pub struct AppState {
     pub cancel_tx: watch::Sender<bool>,
     /// Set to `true` to trigger graceful server shutdown.
     pub shutdown_tx: watch::Sender<bool>,
-    /// When `true` the frontend auto-triggers a preview on first load.
-    pub auto_preview: bool,
+    /// When `true` the frontend auto-triggers a preview on first load. Read
+    /// once: `GET /system` clears it, so a reload does not re-scan both trees.
+    pub auto_preview: AtomicBool,
+    /// The executor task of the current or last run. Shutdown awaits it so
+    /// the process does not exit between two ops of a cancelled plan.
+    pub run_task: Mutex<Option<JoinHandle<()>>>,
     /// When `true` system-critical path checks are skipped.
     pub yolo: bool,
     /// Ring buffer of log entries; capped at 2000. Written by a single
@@ -49,7 +55,8 @@ impl AppState {
             pause_tx,
             cancel_tx,
             shutdown_tx,
-            auto_preview,
+            auto_preview: AtomicBool::new(auto_preview),
+            run_task: Mutex::new(None),
             yolo,
             log_buffer: Mutex::new(VecDeque::new()),
             ws_clients: AtomicUsize::new(0),
@@ -75,6 +82,27 @@ impl AppState {
     pub fn reset_control(&self) {
         self.pause_tx.send_replace(false);
         self.cancel_tx.send_replace(false);
+    }
+
+    /// The one shutdown path for all three triggers (last client gone,
+    /// SIGINT/SIGTERM, `POST /shutdown`).
+    ///
+    /// Cancel first: an in-flight chunked copy polls the cancel flag per
+    /// chunk and stops within 256 KB, where a bare runtime drop would wait
+    /// for the whole file and then abandon the rest of the plan without a
+    /// final status. Then tell the clients, give the frame 200 ms to leave,
+    /// and flip the server's shutdown watch. `server::start` awaits
+    /// `run_task` after `serve` returns so `set_status` has run.
+    pub async fn request_shutdown(&self) {
+        self.cancel_tx.send_replace(true);
+        self.progress.emit(ProgressEvent::Shutdown);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    /// `auto_preview` as the frontend should see it: `true` at most once.
+    pub fn take_auto_preview(&self) -> bool {
+        self.auto_preview.swap(false, Ordering::SeqCst)
     }
 }
 

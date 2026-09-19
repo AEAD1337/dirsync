@@ -10,7 +10,6 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Reject requests that fail the same-origin check.
 ///
@@ -121,9 +120,7 @@ pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
     let state_sig = state.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
-        state_sig.progress.emit(ProgressEvent::Shutdown);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let _ = state_sig.shutdown_tx.send(true);
+        state_sig.request_shutdown().await;
     });
 
     // Mirror log entries to the console so `--gui` runs are debuggable without
@@ -179,6 +176,13 @@ pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
             }
         })
         .await?;
+
+    // request_shutdown set the cancel flag; give the executor the chance to
+    // observe it and write its final status instead of dropping it mid-op.
+    let run_task = state.run_task.lock().unwrap().take();
+    if let Some(handle) = run_task {
+        let _ = handle.await;
+    }
     Ok(())
 }
 

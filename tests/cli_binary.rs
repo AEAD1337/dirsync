@@ -248,3 +248,51 @@ fn the_cli_only_binary_refuses_gui_mode() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("compiled without GUI support"));
 }
+
+#[test]
+fn config_flag_selects_the_named_config_file() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let cfg_dir = TempDir::new().unwrap();
+    let cfg = cfg_dir.path().join("job.toml");
+    fs::write(&cfg, "exclude_patterns = [\"*.tmp\"]\n").unwrap();
+    write_file(src.path(), "keep.txt", b"keep");
+    write_file(src.path(), "skip.tmp", b"skip");
+
+    let out = run(&[
+        "--config",
+        cfg.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        dst.path().to_str().unwrap(),
+    ]);
+
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(dst.path().join("keep.txt").exists());
+    assert!(
+        !dst.path().join("skip.tmp").exists(),
+        "the exclude from the named config file must apply"
+    );
+}
+
+#[test]
+fn a_run_with_failed_ops_exits_nonzero() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    // SRC has a file where DST has a directory whose only content is hidden
+    // from the walk by a builtin exclude: the RmDir that must clear the way
+    // refuses a non-empty directory, so the op fails and lands in the skip log.
+    write_file(src.path(), "blocker.txt", b"file");
+    write_file(dst.path(), "blocker.txt/keep.__dirsync_tmp__", b"hidden");
+
+    let out = run(&[src.path().to_str().unwrap(), dst.path().to_str().unwrap()]);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout: {}
+stderr: {}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("skipped"), "stderr: {}", stderr(&out));
+}

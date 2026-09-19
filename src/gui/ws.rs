@@ -84,7 +84,6 @@ pub enum WsEvent {
         symlink_count: usize,
         total_bytes: u64,
         total_ops: usize,
-        src_dir_sizes: std::collections::HashMap<String, u64>,
     },
     LogEntry {
         level: String,
@@ -122,9 +121,7 @@ async fn shutdown_if_no_client_returns(state: Arc<AppState>) {
     if state.ws_clients.load(AtomicOrdering::SeqCst) > 0 {
         return; // a reload reconnected
     }
-    state.progress.emit(ProgressEvent::Shutdown);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let _ = state.shutdown_tx.send(true);
+    state.request_shutdown().await;
 }
 
 /// The wire form of a status: the serde rename the frontend's `SyncStatus`
@@ -233,7 +230,6 @@ async fn handle_socket(
                                 symlink_count: s.symlink_count,
                                 total_bytes: s.total_bytes,
                                 total_ops: s.total_ops,
-                                src_dir_sizes: s.src_dir_sizes,
                             }
                         })
                     }

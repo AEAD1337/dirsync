@@ -114,6 +114,11 @@ impl CliUi {
                 Ok(ProgressEvent::StatusChanged {
                     status: SyncStatus::Idle | SyncStatus::Cancelled,
                 }) => break,
+                Ok(ProgressEvent::LogEntry(entry)) => {
+                    // Walk warnings and the Ctrl-C notice: printed above the
+                    // spinners rather than through the spinners' redraw.
+                    let _ = multi.println(entry.message);
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
                 _ => {}
             }
@@ -159,6 +164,12 @@ impl CliUi {
                                     }
                                     _ => {}
                                 }
+                            }
+                            ProgressEvent::LogEntry(entry) => {
+                                // Printed through the MultiProgress so the line
+                                // lands above the bar block instead of inside a
+                                // repaint (the Ctrl-C notice used eprintln!).
+                                let _ = self._multi.println(entry.message);
                             }
                             _ => {}
                         },

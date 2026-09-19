@@ -32,6 +32,11 @@ pub struct AppConfig {
     pub last_src: Option<PathBuf>,
     pub last_dst: Option<PathBuf>,
     pub theme: Theme,
+    /// Where this config was loaded from and where `save` writes it back.
+    /// `None` means the platform default (`config_path`). Not part of the
+    /// file or the wire format: `--config` chooses it, nothing else may.
+    #[serde(skip)]
+    pub path: Option<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -42,6 +47,7 @@ impl Default for AppConfig {
             last_src: None,
             last_dst: None,
             theme: Theme::default(),
+            path: None,
         }
     }
 }
@@ -58,9 +64,24 @@ impl AppConfig {
         Self::load_from(&path)
     }
 
-    pub(crate) fn load_from(path: &std::path::Path) -> Self {
+    pub fn load_from(path: &std::path::Path) -> Self {
         let mut cfg: Self = match std::fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    // Falling back silently was destructive: the next save()
+                    // (the GUI does one per preview) overwrote the user's file
+                    // with defaults. Keep the original next to it and say so.
+                    let backup = path.with_extension("toml.bad");
+                    let _ = std::fs::write(&backup, &contents);
+                    eprintln!(
+                        "Warning: could not parse '{}' ({e}); using defaults. The original was saved as '{}'.",
+                        path.display(),
+                        backup.display()
+                    );
+                    Self::default()
+                }
+            },
             Err(_) => Self::default(),
         };
         // A hand-edited port outside the valid range would bind an ephemeral
@@ -69,11 +90,17 @@ impl AppConfig {
         if validate_port(cfg.port).is_err() {
             cfg.port = Self::default().port;
         }
+        cfg.path = Some(path.to_path_buf());
         cfg
     }
 
+    /// Write back to the path this config was loaded from, or the platform
+    /// default when it was never loaded from a file.
     pub fn save(&self) -> Result<()> {
-        let path = Self::config_path().context("cannot determine config path")?;
+        let path = match &self.path {
+            Some(p) => p.clone(),
+            None => Self::config_path().context("cannot determine config path")?,
+        };
         self.save_to(&path)
     }
 
@@ -114,6 +141,7 @@ mod tests {
             last_src: None,
             last_dst: None,
             theme: Theme::Dark,
+            path: None,
         };
         cfg.save_to(&path).unwrap();
 
@@ -151,6 +179,7 @@ mod tests {
             last_src: Some(PathBuf::from("/src")),
             last_dst: Some(PathBuf::from("/dst")),
             theme: Theme::System,
+            path: None,
         };
         original.save_to(&path).unwrap();
 
@@ -176,6 +205,38 @@ mod tests {
 
         let cfg = AppConfig::load_from(&path);
         assert_eq!(cfg.port, 7373);
+    }
+
+    #[test]
+    fn test_load_from_remembers_its_path_and_save_writes_there() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("job.toml");
+        std::fs::write(&path, "port = 8080\n").unwrap();
+
+        let mut cfg = AppConfig::load_from(&path);
+        assert_eq!(cfg.path.as_deref(), Some(path.as_path()));
+        cfg.port = 9090;
+        cfg.save().unwrap();
+
+        let reread = AppConfig::load_from(&path);
+        assert_eq!(reread.port, 9090, "save() must write to the loaded path");
+    }
+
+    #[test]
+    fn test_load_from_backs_up_an_unparseable_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let broken = "port = [[[not valid toml";
+        std::fs::write(&path, broken).unwrap();
+
+        let cfg = AppConfig::load_from(&path);
+        assert_eq!(cfg.port, 7373);
+        let backup = dir.path().join("config.toml.bad");
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            broken,
+            "the unparseable file must be preserved before it can be overwritten"
+        );
     }
 
     #[test]

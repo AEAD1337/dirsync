@@ -1,21 +1,21 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import ProgressBar from './ProgressBar.svelte';
   import { progress, scanState } from '../lib/store';
   import { fmtCount, formatBytes, formatDuration, formatEta } from '../lib/store';
-  import type { ProgressSnapshot } from '../lib/types';
 
-  $: p = $progress;
-  $: isPreviewing = $scanState.active;
+  const p = $derived($progress);
+  const isPreviewing = $derived($scanState.active);
 
-  $: fileLabel = p.current_file
+  const fileLabel = $derived(p.current_file
     ? `${p.current_file}  ${formatBytes(p.current_file_done)} / ${formatBytes(p.current_file_size)}`
-    : '';
+    : '');
 
-  $: overallPct = p.total_bytes > 0
+  const overallPct = $derived(p.total_bytes > 0
     ? (p.done_bytes / p.total_bytes) * 100
-    : (p.status === 'done' ? 100 : 0);
+    : (p.status === 'done' ? 100 : 0));
 
-  $: overallLabel = `${overallPct.toFixed(1)}%`;
+  const overallLabel = $derived(`${overallPct.toFixed(1)}%`);
 
   // A file earns its own bar once what is left of it looks like more than
   // FILE_BAR_SECS at the current speed. Estimated rather than timed, so a slow
@@ -28,27 +28,30 @@
 
   // The file the bar is currently shown for. Keeping it until the file changes
   // is what stops a wobbling speed sample flickering the bar on and off.
-  let fileBarFile: string | null = null;
+  let fileBarFile: string | null = $state(null);
 
-  function updateFileBar(p: ProgressSnapshot) {
-    if (!p.current_file) {
-      fileBarFile = null;
+  $effect(() => {
+    const snap = p;
+    // Read without subscribing: this effect decides the value, it must not
+    // re-run because of its own write.
+    const shownFor = untrack(() => fileBarFile);
+    if (!snap.current_file) {
+      if (shownFor !== null) fileBarFile = null;
       return;
     }
-    if (fileBarFile === p.current_file) return;
-    const remaining = Math.max(p.current_file_size - p.current_file_done, 0);
-    const bytesPerSec = p.speed_mbps * 1024 * 1024;
+    if (shownFor === snap.current_file) return;
+    const remaining = Math.max(snap.current_file_size - snap.current_file_done, 0);
+    const bytesPerSec = snap.speed_mbps * 1024 * 1024;
     const slow = bytesPerSec > 0
       ? remaining / bytesPerSec > FILE_BAR_SECS
-      : p.current_file_size >= FILE_BAR_COLD_BYTES;
-    if (slow) fileBarFile = p.current_file;
-  }
+      : snap.current_file_size >= FILE_BAR_COLD_BYTES;
+    if (slow) fileBarFile = snap.current_file;
+  });
 
-  $: updateFileBar(p);
-  $: showFileBar = !!p.current_file && fileBarFile === p.current_file;
+  const showFileBar = $derived(!!p.current_file && fileBarFile === p.current_file);
 
-  $: remaining = p.eta_secs != null ? formatDuration(p.eta_secs) : '-';
-  $: eta = p.eta_secs != null ? formatEta(p.eta_secs) : '-';
+  const remaining = $derived(p.eta_secs != null ? formatDuration(p.eta_secs) : '-');
+  const eta = $derived(p.eta_secs != null ? formatEta(p.eta_secs) : '-');
 </script>
 
 <div class="bottom-bar">

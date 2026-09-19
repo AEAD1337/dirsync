@@ -120,13 +120,13 @@ The 1 MB threshold matches the partial-hashing threshold, which is a coincidence
 
 ## Progress bar weights all operation types equally via a byte token
 
-**Decision:** Every non-Copy/Overwrite op (`Move`, `Delete`, `MkDir`, `RmDir`, `Symlink`, `TouchMtime`, `CaseRename`) contributes a fixed 8 KB virtual token to `total_bytes` in the plan, and credits that same token to `done_bytes` when it completes. The overall progress percentage is always `done_bytes / total_bytes`.
+**Decision:** Every non-Copy/Overwrite op (`Move`, `Delete`, `MkDir`, `RmDir`, `Symlink`, `TouchMtime`, `CaseRename`) contributes a fixed 128 KB virtual token (`OP_TOKEN_BYTES`) to `total_bytes` in the plan, and credits that same token to `done_bytes` when it completes. The overall progress percentage is always `done_bytes / total_bytes`.
 
 **Why:** Without weighting, `total_bytes` was zero for delete-only or move-only runs, making `overall_pct()` jump to 100 % immediately regardless of how many ops were still pending. Even in mixed runs, phases 1-4 (dirs, moves, symlinks, deletes, rmdirs) completed silently with no bar movement.
 
 **Why a fixed token rather than actual file size for deletes:** Simplicity and predictability. Using the deleted file's real size would make a 10 GB delete dominate the bar over many small copies, which feels counterintuitive. A uniform token keeps progress movement proportional to op count, not file size, for the non-copy portion of the work.
 
-**Why 8 KB:** Small enough that a handful of renames/deletes don't materially distort the percentage when copying gigabytes; large enough to be visible when the plan contains only metadata-class ops.
+**Why 128 KB:** Small enough that a handful of renames/deletes don't materially distort the percentage when copying gigabytes; large enough that a delete-heavy or move-heavy phase visibly advances the bar next to real copies. It started at 8 KB, which was invisible against even a modest copy phase: a thousand deletes weighed the same as one 8 MB file.
 
 **Trade-off:** ETA and MB/s are still byte-based. For ops-only runs (no copies) these will show trivially small values (a few KB/s) rather than meaningful throughput, which is acceptable since such runs complete almost instantly.
 
@@ -225,3 +225,5 @@ All four write calls are guarded with a content comparison and only write when t
 **Why:** `beforeunload` fires on reload exactly as it does on close, so pressing F5 shut down the backend and the reloaded page had nothing to connect to: the reconnect loop then backed off against a dead port. Waiting for a reconnect distinguishes the two cases without needing to know which one happened: a reload is back within a second, a closed tab never returns.
 
 **Trade-off:** closing the tab during a run still ends the run, five seconds later instead of immediately. Keeping the process alive to finish a sync with no UI attached is arguably more correct, but it strands a background process the user can no longer see or cancel; the explicit Close menu item remains the immediate path.
+
+**How it ends:** every shutdown trigger (last client gone, SIGINT/SIGTERM, Close) goes through `AppState::request_shutdown`, which sets the cancel flag before flipping the server's shutdown watch, and `server::start` awaits the executor task after `serve` returns. The in-flight chunked copy therefore stops at its next 256 KB chunk and the executor writes `Cancelled`, instead of the runtime drop waiting for the whole file and then discarding the rest of the plan with no final status.

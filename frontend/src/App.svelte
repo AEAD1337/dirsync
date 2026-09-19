@@ -50,6 +50,10 @@
 
     switch (e.key) {
       case 'Tab': {
+        // Only when a tree panel (or nothing) owns the focus. Everywhere else
+        // the browser's own tab order must run, or the action row and menu
+        // are unreachable by keyboard.
+        if (target !== document.body && !target.closest('.tree-panel')) return;
         e.preventDefault();
         activePanel = activePanel === 'src' ? 'dst' : 'src';
         break;
@@ -187,7 +191,7 @@
     ops.set(sorted);
     completed = new Set();
     pendingCompleted = new Set();
-    planMeta.set({ totalOps: plan.total_ops, totalBytes: plan.total_bytes, srcDirSizes: plan.src_dir_sizes });
+    planMeta.set({ totalOps: plan.total_ops, totalBytes: plan.total_bytes });
   }
 
   // A reload mid-run reconnects the WS, but plan_ready only fires at preview
@@ -221,12 +225,19 @@
       ops.update(list => list.filter(op => op.error));
       completed = new Set();
       driveMode = 'auto';
+      // The plan is consumed (the server drops it too): Run must wait for a
+      // fresh preview rather than re-execute against the mirrored tree.
+      planMeta.set({ totalOps: 0, totalBytes: 0 });
     }
     if (status === 'cancelled' && prevStatus !== 'cancelled') {
       driveMode = 'auto';
     }
-    // Hand off to WS once the run is confirmed (or already finished/cancelled).
-    if (running && (status === 'running' || status === 'done' || status === 'cancelled')) {
+    // Hand off to WS once the run is confirmed. A terminal status only counts
+    // when it follows 'running': the tick sent just before POST /run was
+    // processed still carries the previous run's 'done' and must not clear
+    // the flag early (that briefly re-enabled Run).
+    if (running && (status === 'running'
+        || (prevStatus === 'running' && (status === 'done' || status === 'cancelled')))) {
       running = false;
     }
     // A cancelled preview produces no plan_ready and no error_occurred, so
@@ -258,7 +269,11 @@
     } else if (e.type === 'ops_completed') {
       for (const path of e.rel_paths) pendingCompleted.add(path);
     } else if (e.type === 'shutdown') {
+      // Stop reconnecting first: the server is going away on purpose. Then
+      // try to close the tab; browsers refuse that for tabs a script did not
+      // open, so the overlay below is what the user actually sees.
       shuttingDown = true;
+      ws.disconnect();
       window.close();
     } else if (e.type === 'scan_update') {
       scanState.update(s => ({
@@ -316,7 +331,7 @@
     errors.set([]);
     skippedPrefixes = [];
     previewError = null;
-    planMeta.set({ totalOps: 0, totalBytes: 0, srcDirSizes: {} });
+    planMeta.set({ totalOps: 0, totalBytes: 0 });
     collapsedDirs.set(new Set());
     scanState.set({ active: true, src: null, dst: null });
     previewedSrc = $src;
@@ -363,9 +378,19 @@
     if (runActive) return;
     const prefix = e.path;
     if (!skippedPrefixes.includes(prefix)) skippedPrefixes = [...skippedPrefixes, prefix];
+    let removedOps = 0;
+    let removedBytes = 0;
     ops.update(list => list.filter(op => {
       if (op.kind === 'delete') return true;
-      return !op.rel_path.startsWith(prefix + '/') && op.rel_path !== prefix;
+      const keep = !op.rel_path.startsWith(prefix + '/') && op.rel_path !== prefix;
+      if (!keep) { removedOps++; removedBytes += op.size; }
+      return keep;
+    }));
+    // Keep the header honest: the server recounts the real plan at run time,
+    // the display must not keep quoting the pre-skip totals until then.
+    planMeta.update(m => ({
+      totalOps: Math.max(0, m.totalOps - removedOps),
+      totalBytes: Math.max(0, m.totalBytes - removedBytes),
     }));
   }
 
@@ -374,9 +399,10 @@
     const pattern = prompt('Add exclusion pattern:', e.path.split(/[\\/]/).pop() ?? '');
     if (!pattern) return;
     try {
-      const updated = { ...get(config), exclude_patterns: [...get(config).exclude_patterns, pattern] };
-      await api.putConfig(updated);
-      config.set(updated);
+      const exclude_patterns = [...get(config).exclude_patterns, pattern];
+      // Send only the field that changed; the server merges and returns the
+      // full config, including the last-used paths it owns.
+      config.set(await api.putConfig({ exclude_patterns }));
     } catch (err) {
       alert(`Failed to save exclusion: ${err}`);
     }
@@ -414,17 +440,17 @@
       previewedSrc &&
       ($src !== previewedSrc || $dst !== previewedDst)
     ) {
-      planMeta.set({ totalOps: 0, totalBytes: 0, srcDirSizes: {} });
+      planMeta.set({ totalOps: 0, totalBytes: 0 });
       ops.set([]);
     }
   });
 
-  // SRC panel: copy/overwrite/move/symlink ops. DST panel: delete/move/rename ops.
-  // Symlinks belong with the writes: they create an entry in the destination.
+  // SRC panel: copy/overwrite/move/symlink/touch ops. DST panel: delete/move/rename ops.
+  // Symlinks and touches belong with the writes: both modify the destination.
   // The kind-filtered lists are completion-agnostic (stable during a run) so
   // the dir-size aggregations below don't recompute on every flush; the
   // per-panel row lists then drop completed ops.
-  const srcKindOps = $derived($ops.filter(op => op.kind === 'copy' || op.kind === 'overwrite' || op.kind === 'move' || op.kind === 'symlink'));
+  const srcKindOps = $derived($ops.filter(op => op.kind === 'copy' || op.kind === 'overwrite' || op.kind === 'move' || op.kind === 'symlink' || op.kind === 'touch'));
   const dstKindOps = $derived($ops.filter(op => op.kind === 'delete' || op.kind === 'move' || op.kind === 'dir-rename' || op.kind === 'case-rename'));
   const srcOps = $derived(srcKindOps.filter(op => op.error || !completed.has(op.rel_path)));
   const dstOps = $derived(dstKindOps.filter(op => op.error || !completed.has(op.rel_path)));
@@ -558,6 +584,14 @@
     onclear={() => { logEntries = []; }}
   />
 {/if}
+{#if shuttingDown}
+  <div class="shutdown-overlay" role="alert">
+    <div class="shutdown-card">
+      <strong>dirsync has stopped.</strong>
+      <span>The server was shut down. You can close this tab.</span>
+    </div>
+  </div>
+{/if}
 
 <style>
   :global(*) { box-sizing: border-box; margin: 0; padding: 0; }
@@ -650,6 +684,28 @@
     opacity: 0.7;
   }
   .preview-error-close:hover { opacity: 1; }
+
+  .shutdown-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: rgba(0,0,0,0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .shutdown-card {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  }
 
   .panels {
     flex: 1;
