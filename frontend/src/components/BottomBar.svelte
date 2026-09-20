@@ -123,7 +123,7 @@
   .ind-value { display: inline-block; }
   .ind-value.ops { min-width: 13ch; }     /* 999,999/999,999 */
   .ind-value.data { min-width: 17ch; }    /* 999.9 GB/999.9 GB */
-  .ind-value.time { min-width: 10ch; }    /* 9h 59m 59s */
+  .ind-value.time { min-width: 8ch; }     /* 999h 59m, 59m 59s */
   .ind-value.eta { min-width: 8ch; }      /* Wed 10:47 */
   .ind-value.speed { min-width: 11ch; }   /* 1000.0 MB/s */
 </style>

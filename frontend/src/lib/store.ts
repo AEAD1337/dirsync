@@ -79,11 +79,14 @@ export function formatBytes(bytes: number, decimals = 1): string {
   return `${(bytes / Math.pow(k, i)).toFixed(decimals)} ${sizes[i]}`;
 }
 
+/** Coarsens with magnitude: seconds are noise next to an hour, and a ticking
+ *  seconds digit on a multi-hour reading is just motion. Matches the CLI's
+ *  own `format_duration`. */
 export function formatDuration(secs: number): string {
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
   const s = Math.floor(secs % 60);
-  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
   if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
   return `${s}s`;
 }
