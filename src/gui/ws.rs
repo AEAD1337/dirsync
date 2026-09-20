@@ -36,6 +36,10 @@ pub enum WsEvent {
         current_file_done: u64,
         current_file_size: u64,
         current_file_pct: f32,
+        /// Directory the current chunked copy writes into, relative to
+        /// `dst_root`. The client keeps that row's active marker lit while a
+        /// long file runs, when no completions are arriving to imply it.
+        current_dir: Option<String>,
         speed_mbps: f64,
         elapsed_secs: u64,
         eta_secs: Option<u64>,
@@ -124,6 +128,26 @@ async fn shutdown_if_no_client_returns(state: Arc<AppState>) {
     state.request_shutdown().await;
 }
 
+/// The directory the chunked copy path is currently writing into, relative to
+/// `dst_root` and forward-slashed.
+///
+/// `None` when nothing is copying, when the file sits directly in `dst_root`
+/// (no directory row exists for it), or when the target is somehow outside
+/// `dst_root`: the client matches this against row paths, so an absolute path
+/// would be meaningless there as well as a needless disclosure.
+pub fn current_dir_rel(state: &AppState) -> Option<String> {
+    let dst = state.progress.current_file_dst.read().unwrap().clone()?;
+    let parent = dst.parent()?;
+    let dst_root = state
+        .last_plan
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.dst_root.clone())?;
+    let rel = crate::paths::to_slash(parent.strip_prefix(&dst_root).ok()?);
+    if rel.is_empty() { None } else { Some(rel) }
+}
+
 /// The wire form of a status: the serde rename the frontend's `SyncStatus`
 /// union is written against.
 fn status_str(status: &crate::progress::SyncStatus) -> String {
@@ -155,6 +179,7 @@ async fn handle_socket(
                     current_file_done: p.current_file_done.load(std::sync::atomic::Ordering::Relaxed),
                     current_file_size: p.current_file_size.load(std::sync::atomic::Ordering::Relaxed),
                     current_file_pct: p.file_pct(),
+                    current_dir: current_dir_rel(&state),
                     speed_mbps: p.speed_mbps(),
                     elapsed_secs: p.elapsed_secs(),
                     eta_secs: p.eta_secs(),

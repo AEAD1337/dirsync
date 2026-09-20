@@ -91,6 +91,13 @@ pub struct ProgressState {
     pub ops_total: AtomicUsize,
     pub ops_done: AtomicUsize,
     pub current_file: RwLock<Option<String>>,
+    /// Absolute DST path of the file the chunked copy path is writing, or
+    /// `None`. Only that path sets it: the parallel small-file workers would
+    /// fight over one slot, and they complete fast enough for the GUI to
+    /// track them through `OpDone` instead. The GUI turns this into the
+    /// directory row it keeps lit for the whole of a long copy, which the
+    /// completion stream alone cannot do (it is silent until the file lands).
+    pub current_file_dst: RwLock<Option<std::path::PathBuf>>,
     pub current_file_size: AtomicU64,
     pub current_file_done: AtomicU64,
     pub started_at: Mutex<Option<Instant>>,
@@ -116,6 +123,7 @@ impl ProgressState {
             ops_total: AtomicUsize::new(0),
             ops_done: AtomicUsize::new(0),
             current_file: RwLock::new(None),
+            current_file_dst: RwLock::new(None),
             current_file_size: AtomicU64::new(0),
             current_file_done: AtomicU64::new(0),
             started_at: Mutex::new(None),
@@ -136,6 +144,7 @@ impl ProgressState {
         self.current_file_done.store(0, Ordering::Relaxed);
         self.current_file_size.store(0, Ordering::Relaxed);
         *self.current_file.write().unwrap() = None;
+        *self.current_file_dst.write().unwrap() = None;
         *self.started_at.lock().unwrap() = Some(Instant::now());
         *self.paused_at.lock().unwrap() = None;
         *self.stopped_at.lock().unwrap() = None;

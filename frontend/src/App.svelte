@@ -6,7 +6,7 @@
   import AboutDialog from './components/dialogs/AboutDialog.svelte';
   import LicensesDialog from './components/dialogs/LicensesDialog.svelte';
   import { api, ApiError, SyncWebSocket } from './lib/api';
-  import { config, src, dst, progress, ops, errors, isDark, scanState, scanProgress, collapsedDirs, planMeta, pathSep } from './lib/store';
+  import { config, src, dst, progress, ops, errors, isDark, scanState, scanProgress, collapsedDirs, activeDirs, planMeta, pathSep } from './lib/store';
   import { buildDisplayRows, mergeRows, pathKey } from './lib/treeUtils';
   import { get } from 'svelte/store';
   import type { WsEvent, OpEntry, LogEntry, PlanSummary } from './lib/types';
@@ -172,9 +172,45 @@
   // An async onMount returns a Promise, which Svelte ignores: the interval
   // would leak on unmount if registered inside the async callback above.
   onMount(() => {
-    const completedTimer = setInterval(flushCompleted, 100);
+    const completedTimer = setInterval(() => { flushCompleted(); refreshActiveDirs(); }, 100);
     return () => clearInterval(completedTimer);
   });
+
+  // Directories with work in flight, from two sources because neither alone
+  // covers a run: completions say where the parallel small copies are but go
+  // silent for the whole of a large file, and current_dir covers exactly that
+  // gap. A completion keeps its directory marked for ACTIVE_HOLD_MS so the
+  // 10x/s flush cannot strobe the marker as consecutive batches land in
+  // different siblings. Only the immediate parent is marked: marking the
+  // whole ancestor chain would keep the root lit and say nothing.
+  const ACTIVE_HOLD_MS = 800;
+  const dirLastSeen = new Map<string, number>();
+  let copyingDir: string | null = null;
+
+  function parentDir(relPath: string): string | null {
+    const p = relPath.replace(/\\/g, '/');
+    const cut = p.lastIndexOf('/');
+    return cut > 0 ? p.slice(0, cut) : null;
+  }
+
+  function refreshActiveDirs() {
+    const now = Date.now();
+    for (const [dir, seen] of dirLastSeen) {
+      if (now - seen > ACTIVE_HOLD_MS) dirLastSeen.delete(dir);
+    }
+    const next = new Set(dirLastSeen.keys());
+    if (copyingDir) next.add(copyingDir);
+    // Publish only a real change: every write re-renders both panels' rows.
+    const current = get(activeDirs);
+    if (next.size === current.size && [...next].every(d => current.has(d))) return;
+    activeDirs.set(next);
+  }
+
+  function clearActiveDirs() {
+    dirLastSeen.clear();
+    copyingDir = null;
+    activeDirs.set(new Set());
+  }
 
   onDestroy(() => ws.disconnect());
 
@@ -225,12 +261,14 @@
       ops.update(list => list.filter(op => op.error));
       completed = new Set();
       driveMode = 'auto';
+      clearActiveDirs();
       // The plan is consumed (the server drops it too): Run must wait for a
       // fresh preview rather than re-execute against the mirrored tree.
       planMeta.set({ totalOps: 0, totalBytes: 0 });
     }
     if (status === 'cancelled' && prevStatus !== 'cancelled') {
       driveMode = 'auto';
+      clearActiveDirs();
     }
     // Hand off to WS once the run is confirmed. A terminal status only counts
     // when it follows 'running': the tick sent just before POST /run was
@@ -251,6 +289,7 @@
   function handleWsEvent(e: WsEvent) {
     if (e.type === 'progress_update') {
       progress.set(e);
+      copyingDir = e.current_dir ?? null;
       applyStatus(e.status);
     } else if (e.type === 'status_changed') {
       applyStatus(e.status);
@@ -267,7 +306,12 @@
         );
       }
     } else if (e.type === 'ops_completed') {
-      for (const path of e.rel_paths) pendingCompleted.add(path);
+      const now = Date.now();
+      for (const path of e.rel_paths) {
+        pendingCompleted.add(path);
+        const dir = parentDir(path);
+        if (dir) dirLastSeen.set(dir, now);
+      }
     } else if (e.type === 'shutdown') {
       // Stop reconnecting first: the server is going away on purpose. Then
       // try to close the tab; browsers refuse that for tabs a script did not
@@ -331,6 +375,7 @@
     errors.set([]);
     skippedPrefixes = [];
     previewError = null;
+    clearActiveDirs();
     planMeta.set({ totalOps: 0, totalBytes: 0 });
     collapsedDirs.set(new Set());
     scanState.set({ active: true, src: null, dst: null });

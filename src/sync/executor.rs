@@ -726,6 +726,8 @@ async fn do_copy(
     progress.current_file_size.store(size, Ordering::Relaxed);
     progress.current_file_done.store(0, Ordering::Relaxed);
     *progress.current_file.write().unwrap() = Some(name.clone());
+    // The GUI lights this file's directory for as long as the copy runs.
+    *progress.current_file_dst.write().unwrap() = Some(dst.to_path_buf());
     progress.emit(ProgressEvent::FileStarted {
         name: name.clone(),
         size,
@@ -739,6 +741,7 @@ async fn do_copy(
         // failed file as in-progress until the next copy starts.
         if let Err(e) = copy_with_progress(src, dst, progress, cancel_rx).await {
             *progress.current_file.write().unwrap() = None;
+            *progress.current_file_dst.write().unwrap() = None;
             return Err(e);
         }
     } else {
@@ -748,6 +751,7 @@ async fn do_copy(
 
     progress.emit(ProgressEvent::FileDone { name: name.clone() });
     *progress.current_file.write().unwrap() = None;
+    *progress.current_file_dst.write().unwrap() = None;
 
     Ok(format!(
         "{verb} {} ({})",

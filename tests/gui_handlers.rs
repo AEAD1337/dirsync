@@ -190,3 +190,65 @@ async fn static_handler_returns_404_under_the_api_prefix() {
     let response = static_handler(uri).await.into_response();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[test]
+fn current_dir_is_none_when_no_file_is_being_copied() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with_config(&dir, AppConfig::default(), false);
+    *state.last_plan.write().unwrap() = Some(plan_for(
+        PathBuf::from("/src"),
+        PathBuf::from("/dst"),
+        vec![],
+    ));
+
+    assert_eq!(dirsync::gui::ws::current_dir_rel(&state), None);
+}
+
+#[test]
+fn current_dir_is_the_dst_relative_parent_of_the_file_being_copied() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with_config(&dir, AppConfig::default(), false);
+    *state.last_plan.write().unwrap() = Some(plan_for(
+        PathBuf::from("/src"),
+        PathBuf::from("/dst"),
+        vec![],
+    ));
+    *state.progress.current_file_dst.write().unwrap() =
+        Some(PathBuf::from("/dst/photos/2024/a.jpg"));
+
+    assert_eq!(
+        dirsync::gui::ws::current_dir_rel(&state).as_deref(),
+        Some("photos/2024"),
+        "the GUI lights this row for the whole of a chunked copy"
+    );
+}
+
+#[test]
+fn current_dir_is_none_for_a_file_directly_in_the_destination_root() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with_config(&dir, AppConfig::default(), false);
+    *state.last_plan.write().unwrap() = Some(plan_for(
+        PathBuf::from("/src"),
+        PathBuf::from("/dst"),
+        vec![],
+    ));
+    *state.progress.current_file_dst.write().unwrap() = Some(PathBuf::from("/dst/a.jpg"));
+
+    // No directory row exists for a top-level file, so there is nothing to light.
+    assert_eq!(dirsync::gui::ws::current_dir_rel(&state), None);
+}
+
+#[test]
+fn current_dir_is_none_for_a_target_outside_the_destination_root() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with_config(&dir, AppConfig::default(), false);
+    *state.last_plan.write().unwrap() = Some(plan_for(
+        PathBuf::from("/src"),
+        PathBuf::from("/dst"),
+        vec![],
+    ));
+    *state.progress.current_file_dst.write().unwrap() = Some(PathBuf::from("/elsewhere/a.jpg"));
+
+    // Never hand the client an absolute path it cannot match against a row.
+    assert_eq!(dirsync::gui::ws::current_dir_rel(&state), None);
+}

@@ -19,6 +19,7 @@ export const progress = writable<ProgressSnapshot>({
   current_file_done: 0,
   current_file_size: 0,
   current_file_pct: 0,
+  current_dir: null,
   speed_mbps: 0,
   elapsed_secs: 0,
   eta_secs: null,
@@ -39,6 +40,12 @@ export const isDark = writable(false);
 
 // Native path separator for the server OS ('\\' on Windows, '/' on Linux/macOS).
 export const pathSep = writable('/');
+
+// Directories with work in flight right now, as forward-slash paths relative
+// to dst_root. Shared by both panels: a directory only has a row in the panel
+// whose op kinds it holds, so the same set lights copies on the left and
+// deletes on the right without either needing to filter it.
+export const activeDirs = writable(new Set<string>());
 
 // Collapsed directory paths shared between the two tree panels.
 export const collapsedDirs = writable(new Set<string>());

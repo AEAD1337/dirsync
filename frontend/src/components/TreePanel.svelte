@@ -1,7 +1,7 @@
 <script lang="ts">
   import ContextMenu from './ContextMenu.svelte';
   import type { DisplayRow } from '../lib/treeUtils';
-  import { fmtCount, formatBytes, collapsedDirs } from '../lib/store';
+  import { fmtCount, formatBytes, collapsedDirs, activeDirs } from '../lib/store';
 
   let {
     rows = [],
@@ -200,6 +200,7 @@
           {:else if row.rowType === 'dir'}
             <div
               class="tree-dir"
+              class:dir-active={$activeDirs.has(row.path)}
               class:row-focused={firstVisible + i === focusedIndex}
               style="padding-left: {8 + row.depth * 16}px"
               role="button"
@@ -375,6 +376,13 @@
     cursor: pointer;
   }
   .tree-dir:hover { background: var(--hover); }
+  /* Work in flight here right now. An inset shadow rather than a border so
+     the row stays exactly ROW_HEIGHT and the text does not shift; it leaves
+     background and outline free for hover and keyboard focus. */
+  .tree-dir.dir-active {
+    color: var(--text);
+    box-shadow: inset 6px 0 0 var(--accent-green), inset -6px 0 0 var(--accent-green);
+  }
   .tree-dir.row-focused,
   .tree-row.row-focused { background: var(--hover); outline: 2px solid var(--accent-blue); outline-offset: -2px; }
   .dir-chevron {

@@ -63,6 +63,7 @@ export interface ProgressSnapshot {
   current_file_done: number;
   current_file_size: number;
   current_file_pct: number;
+  current_dir: string | null;
   speed_mbps: number;
   elapsed_secs: number;
   eta_secs: number | null;

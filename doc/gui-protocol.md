@@ -228,6 +228,7 @@ Sent every 100 ms while the WebSocket connection is open. Provides a complete sn
   "current_file_done": 32768000,
   "current_file_size": 104857600,
   "current_file_pct": 31.25,
+  "current_dir": "photos/2024",
   "speed_mbps": 45.3,
   "elapsed_secs": 12,
   "eta_secs": 11,
@@ -236,7 +237,7 @@ Sent every 100 ms while the WebSocket connection is open. Provides a complete sn
   "status": "running"
 }
 ```
-`current_file` is `null` when no large-file copy is in progress. `eta_secs` is `null` when speed is too low to estimate. `status` mirrors the state machine values: `"idle"`, `"previewing"`, `"running"`, `"paused"`, `"done"`, `"cancelled"`. `total_bytes` includes 128 KB virtual tokens for non-copy ops (see plan `total_bytes` note above); overall progress is always `done_bytes / total_bytes`.
+`current_file` is `null` when no large-file copy is in progress. `current_dir` is that file's directory relative to `dst_root`, forward-slashed, and is `null` whenever `current_file` is, plus for a file sitting directly in `dst_root` (which has no directory row to mark). The GUI marks that row as active for the whole copy: `ops_completed` implies where the parallel small copies are working, but says nothing during one long file. `eta_secs` is `null` when speed is too low to estimate. `status` mirrors the state machine values: `"idle"`, `"previewing"`, `"running"`, `"paused"`, `"done"`, `"cancelled"`. `total_bytes` includes 128 KB virtual tokens for non-copy ops (see plan `total_bytes` note above); overall progress is always `done_bytes / total_bytes`.
 
 #### `status_changed`
 Pushed on every status transition, as it happens.
