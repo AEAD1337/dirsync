@@ -4,7 +4,7 @@ set -euo pipefail
 ACTION="${1:-}"
 if [[ -z "$ACTION" ]]; then
     echo "Usage: ./make.sh <action>"
-    echo "Actions: all build clean sweep release run test update size loc coverage"
+    echo "Actions: all build bundle clean sweep release run test update size loc coverage"
     exit 1
 fi
 
@@ -42,19 +42,21 @@ case "$ACTION" in
         # npm outdated exits 1 when packages are behind: informational, not a failure.
         pushd frontend > /dev/null; npm outdated || true; popd > /dev/null
         ;;
+    # No explicit `npm run build` before cargo: build.rs runs Vite itself
+    # whenever the gui feature is on, after syncing the version into
+    # package.json, so an earlier Vite run would be redundant and stale.
     build)
         run_frontend npm install --no-fund
-        run_frontend npm run build
+        run_frontend npm run check
         run_cargo_checks
         ;;
     run)
         run_frontend npm install --no-fund --no-audit
-        run_frontend npm run build
         run cargo run --features gui -- --gui
         ;;
     all)
         run_frontend npm clean-install --no-fund
-        run_frontend npm run build
+        run_frontend npm run check
         run rustup update
         run cargo update
         run_cargo_checks
@@ -62,7 +64,7 @@ case "$ACTION" in
         ;;
     release)
         run_frontend npm install --no-fund
-        run_frontend npm run build
+        run_frontend npm run check
         run rustup update
         run cargo update
         run_cargo_checks "--release"
@@ -87,7 +89,26 @@ case "$ACTION" in
         ;;
 
     size)
-        run cargo bloat --release --features gui --crates
+        run cargo bloat --release --features gui --crates # cargo install cargo-bloat
+        ;;
+    bundle)
+        # Same selection and layout as make.ps1: every .rs, .ts and .svelte
+        # file outside target/ and node_modules/ except the generated license
+        # table, sorted by path, each under a "=== path ===" header.
+        root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+        out="$root/bundle.txt"
+        count=0
+        : > "$out"
+        while IFS= read -r -d '' rel; do
+            rel="${rel#./}"
+            printf '=== %s ===\n' "$rel" >> "$out"
+            cat "$root/$rel" >> "$out"
+            printf '\n' >> "$out"
+            count=$((count + 1))
+        done < <(cd "$root" && find . -type f \( -name '*.rs' -o -name '*.ts' -o -name '*.svelte' \) \
+            -not -path '*/target/*' -not -path '*/node_modules/*' \
+            -not -name 'licenses_generated.ts' -print0 | LC_ALL=C sort -z)
+        echo -e "${CYAN}Bundled $count files -> bundle.txt${NC}"
         ;;
     loc)
         loc_files() {
@@ -172,7 +193,7 @@ case "$ACTION" in
         ;;
     *)
         echo "Unknown action: $ACTION"
-        echo "Actions: all build clean sweep release run test update size loc"
+        echo "Actions: all build bundle clean sweep release run test update size loc coverage"
         exit 1
         ;;
 esac

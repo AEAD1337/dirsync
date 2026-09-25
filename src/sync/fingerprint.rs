@@ -13,8 +13,10 @@ pub fn hash_file(path: &Path, size: u64) -> Result<[u8; 32]> {
     hasher.update(size.to_le_bytes());
 
     if size <= PARTIAL_THRESHOLD {
+        // Bounded by the walked size: a file that grew since the walk (an
+        // active log, a VM disk) must not be read whole into memory.
         let mut buf = Vec::with_capacity(size as usize);
-        file.read_to_end(&mut buf)?;
+        (&mut file).take(size).read_to_end(&mut buf)?;
         hasher.update(&buf);
     } else {
         // First 0.5 MB

@@ -49,6 +49,7 @@ fn matched(src: FileEntry, result: MatchResult) -> MatchedEntry {
         result,
         src_hash: None,
         case_renamed_from: None,
+        touch_after_move: false,
     }
 }
 
@@ -57,6 +58,7 @@ fn output(matched: Vec<MatchedEntry>, orphans: Vec<FileEntry>) -> MatchOutput {
         matched,
         orphans: orphans.into_iter().map(|dst| OrphanEntry { dst }).collect(),
         renamed_dirs: vec![],
+        case_insensitive: false,
     }
 }
 
@@ -90,7 +92,7 @@ fn a_new_src_symlink_becomes_a_symlink_op_not_a_copy() {
     let plan = run(out, &[], &[]);
 
     match plan.ops.as_slice() {
-        [SyncOp::Symlink { target, dst: d }] => {
+        [SyncOp::Symlink { target, dst: d, .. }] => {
             assert_eq!(target, Path::new("target.txt"));
             assert_eq!(*d, dst("link"));
         }
@@ -252,16 +254,22 @@ fn a_dst_directory_with_no_src_counterpart_is_removed() {
 // would fail non-empty, leaving the old spelling in place. The planner emits
 // a CaseRename instead, which the executor performs as a two-step rename.
 
+/// A MatchOutput for a case-insensitive DST, as the matcher reports it on
+/// NTFS, APFS, exFAT and the like.
+fn ci(mut out: MatchOutput) -> MatchOutput {
+    out.case_insensitive = true;
+    out
+}
+
 #[test]
-#[cfg(windows)]
 fn a_file_move_that_only_changes_case_becomes_a_case_rename() {
-    let out = output(
+    let out = ci(output(
         vec![matched(
             file("Readme.md", 12),
             MatchResult::MovedFrom(PathBuf::from("readme.md")),
         )],
         vec![],
-    );
+    ));
 
     let plan = run(out, &[], &[]);
 
@@ -276,9 +284,8 @@ fn a_file_move_that_only_changes_case_becomes_a_case_rename() {
 }
 
 #[test]
-#[cfg(windows)]
 fn a_directory_rename_that_only_changes_case_becomes_a_case_rename() {
-    let mut out = output(vec![], vec![]);
+    let mut out = ci(output(vec![], vec![]));
     out.renamed_dirs = vec![RenamedDir {
         src_rel: PathBuf::from("Docs"),
         dst_rel: PathBuf::from("docs"),
@@ -297,12 +304,11 @@ fn a_directory_rename_that_only_changes_case_becomes_a_case_rename() {
 }
 
 #[test]
-#[cfg(windows)]
 fn a_new_dir_matching_an_extra_dst_dir_by_case_is_repaired_in_place() {
     // No fingerprint rename here: the contents differ, so the dir arrives as
     // a new SRC dir plus an extra DST dir. Without the CaseRename this pair
     // would become a MkDir that no-ops and an RmDir that fails.
-    let plan = run(output(vec![], vec![]), &[dir("Docs")], &[dir("docs")]);
+    let plan = run(ci(output(vec![], vec![])), &[dir("Docs")], &[dir("docs")]);
 
     assert!(
         matches!(
@@ -319,12 +325,11 @@ fn a_new_dir_matching_an_extra_dst_dir_by_case_is_repaired_in_place() {
 }
 
 #[test]
-#[cfg(windows)]
 fn a_case_renamed_entry_is_not_also_counted_as_identical() {
     let mut entry = matched(file("Notes.txt", 4), MatchResult::Identical);
     entry.case_renamed_from = Some(PathBuf::from("notes.txt"));
 
-    let plan = run(output(vec![entry], vec![]), &[], &[]);
+    let plan = run(ci(output(vec![entry], vec![])), &[], &[]);
 
     // The CaseRename is the whole job; counting the file as identical too
     // reported it twice in the summary.
@@ -336,8 +341,7 @@ fn a_case_renamed_entry_is_not_also_counted_as_identical() {
 }
 
 #[test]
-#[cfg(not(windows))]
-fn a_move_that_only_changes_case_is_a_plain_move_off_windows() {
+fn a_move_that_only_changes_case_is_a_plain_move_on_a_case_sensitive_dst() {
     let out = output(
         vec![matched(
             file("Readme.md", 12),
@@ -389,4 +393,75 @@ fn skipping_a_directory_drops_its_writes_but_keeps_its_cleanup() {
     assert!(plan.ops.iter().any(|op| matches!(op,
         SyncOp::Copy { dst: d, .. } if *d == kept
     )));
+}
+
+// --- Case-insensitive destinations (macOS APFS, exFAT/NTFS/SMB mounts) ---
+
+fn deletes(plan: &SyncPlan) -> Vec<String> {
+    plan.ops
+        .iter()
+        .filter_map(|op| match op {
+            SyncOp::Delete { path, .. } => Some(dirsync::paths::to_slash(path)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn on_a_case_insensitive_dst_a_case_variant_of_a_write_target_is_not_deleted() {
+    let mut out = output(
+        vec![matched(file("photo.jpg", 5), MatchResult::NewInSrc)],
+        vec![dst_file("Photo.jpg", 4)],
+    );
+    out.case_insensitive = true;
+
+    let plan = plan(
+        out,
+        &[],
+        &[],
+        Path::new(SRC_ROOT),
+        Path::new(DST_ROOT),
+        false,
+    );
+
+    // Copy photo.jpg lands on the same on-disk file as Photo.jpg: deleting
+    // Photo.jpg afterwards would delete the fresh copy.
+    assert!(deletes(&plan).is_empty(), "{:?}", plan.ops);
+}
+
+#[test]
+fn on_a_case_sensitive_dst_the_case_variant_is_a_real_orphan() {
+    let out = output(
+        vec![matched(file("photo.jpg", 5), MatchResult::NewInSrc)],
+        vec![dst_file("Photo.jpg", 4)],
+    );
+
+    let plan = plan(
+        out,
+        &[],
+        &[],
+        Path::new(SRC_ROOT),
+        Path::new(DST_ROOT),
+        false,
+    );
+
+    assert_eq!(deletes(&plan), vec!["/dst/Photo.jpg"]);
+}
+
+#[test]
+fn on_a_case_insensitive_dst_a_new_dir_suppresses_the_delete_of_a_case_variant_file() {
+    let mut out = output(vec![], vec![dst_file("A", 4)]);
+    out.case_insensitive = true;
+
+    let plan = plan(
+        out,
+        &[dir("a")],
+        &[],
+        Path::new(SRC_ROOT),
+        Path::new(DST_ROOT),
+        false,
+    );
+
+    // MkDir a replaces file A; a Delete of A would then remove the new dir.
+    assert!(deletes(&plan).is_empty(), "{:?}", plan.ops);
 }

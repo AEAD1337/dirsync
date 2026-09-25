@@ -1,18 +1,6 @@
-use crate::gui::handlers::plan_to_summary;
+use crate::gui::handlers::{PlanSummary, plan_to_summary};
 use crate::gui::state::AppState;
-use crate::progress::{ProgressEvent, ScanPhase};
-
-pub(crate) const LOG_BUFFER_CAP: usize = 2000;
-
-pub(crate) fn push_log_entry(
-    buf: &mut std::collections::VecDeque<crate::progress::LogEntry>,
-    entry: crate::progress::LogEntry,
-) {
-    if buf.len() >= LOG_BUFFER_CAP {
-        buf.pop_front();
-    }
-    buf.push_back(entry);
-}
+use crate::progress::{LogLevel, ProgressEvent, ScanPhase, SyncStatus};
 use axum::{
     extract::{
         State,
@@ -25,6 +13,18 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::Duration;
 use tokio::time::interval;
+
+pub(crate) const LOG_BUFFER_CAP: usize = 2000;
+
+pub(crate) fn push_log_entry(
+    buf: &mut std::collections::VecDeque<crate::progress::LogEntry>,
+    entry: crate::progress::LogEntry,
+) {
+    if buf.len() >= LOG_BUFFER_CAP {
+        buf.pop_front();
+    }
+    buf.push_back(entry);
+}
 
 #[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -45,7 +45,7 @@ pub enum WsEvent {
         eta_secs: Option<u64>,
         ops_done: usize,
         ops_total: usize,
-        status: String,
+        status: SyncStatus,
     },
     /// Every status transition, pushed as it happens. The 100 ms tick above
     /// only *samples* the status, so a state the engine passes through inside
@@ -53,10 +53,18 @@ pub enum WsEvent {
     /// see the `previewing` → `idle` edge to know its preview ended (a
     /// cancelled preview produces no `plan_ready` and no `error_occurred`).
     StatusChanged {
-        status: String,
+        status: SyncStatus,
     },
+    /// One op failed. `path` is DST-relative and forward-slashed: the same
+    /// form as `OpEntry::rel_path`, so the client can mark that row.
     ErrorOccurred {
         path: String,
+        message: String,
+    },
+    /// The preview failed (not cancelled). Its own event rather than an
+    /// `ErrorOccurred` with a sentinel path, which a root-level file of the
+    /// same name would collide with.
+    PreviewFailed {
         message: String,
     },
     /// Batch of op-completed paths flushed once per tick (~100 ms) instead of
@@ -73,27 +81,103 @@ pub enum WsEvent {
         phase: String,
         path: Option<String>,
     },
-    /// Sent when preview finishes. Carries the full plan so the frontend can
-    /// populate the op tables without a second round-trip.
     DriveMode {
         hdd: bool,
     },
-    PlanReady {
-        ops: Vec<crate::gui::handlers::OpEntry>,
-        copy_count: usize,
-        move_count: usize,
-        delete_count: usize,
-        overwrite_count: usize,
-        identical_count: usize,
-        symlink_count: usize,
-        total_bytes: u64,
-        total_ops: usize,
-    },
+    /// Sent when preview finishes. Carries the full plan so the frontend can
+    /// populate the op tables without a second round-trip.
+    PlanReady(PlanSummary),
     LogEntry {
-        level: String,
+        level: LogLevel,
         message: String,
         run: u32,
     },
+}
+
+/// What one progress event means for a WebSocket client.
+pub enum WsOutput {
+    /// Send this event now.
+    Send(WsEvent),
+    /// A finished op's DST-relative path, batched into the next tick's
+    /// `OpsCompleted` instead of one frame per file.
+    Completed(String),
+    /// Nothing for the client.
+    Skip,
+}
+
+/// `path` (absolute, under the current plan's DST root) in the client's row
+/// form: DST-relative and forward-slashed.
+fn rel_to_plan_dst(state: &AppState, path: String) -> String {
+    let dst_root = state
+        .last_plan
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.dst_root.clone());
+    match dst_root {
+        Some(root) => crate::paths::rel_to_root(std::path::Path::new(&path), &root),
+        None => path,
+    }
+}
+
+/// Translate one engine progress event into what the client receives.
+pub fn ws_event_for(state: &AppState, event: ProgressEvent) -> WsOutput {
+    let ev = match event {
+        ProgressEvent::StatusChanged { status } => WsEvent::StatusChanged { status },
+        ProgressEvent::FileError { name, message } => WsEvent::ErrorOccurred {
+            path: rel_to_plan_dst(state, name),
+            message,
+        },
+        ProgressEvent::PreviewFailed { message } => WsEvent::PreviewFailed { message },
+        ProgressEvent::OpDone { path, .. } => {
+            return WsOutput::Completed(rel_to_plan_dst(state, path));
+        }
+        ProgressEvent::ScanUpdate { side, file_count } => WsEvent::ScanUpdate { side, file_count },
+        ProgressEvent::ScanProgress { phase, path } => {
+            let phase = match &phase {
+                ScanPhase::Walking { side } => format!("walking_{side}"),
+                ScanPhase::Hashing => "hashing".to_owned(),
+                ScanPhase::Planning => "planning".to_owned(),
+            };
+            WsEvent::ScanProgress { phase, path }
+        }
+        ProgressEvent::DriveMode { hdd } => WsEvent::DriveMode { hdd },
+        ProgressEvent::PlanReady => {
+            // Read the plan and send it in full so the frontend can populate
+            // the tables without a separate HTTP call.
+            let guard = state.last_plan.read().unwrap();
+            match guard.as_ref() {
+                Some(plan) => WsEvent::PlanReady(plan_to_summary(plan)),
+                None => return WsOutput::Skip,
+            }
+        }
+        ProgressEvent::Shutdown => WsEvent::Shutdown,
+        // The ring buffer is filled by a single server-side task (see
+        // gui::server::start), not here: writing it per connection
+        // duplicated every entry once per open tab and buffered nothing at
+        // all with no tab open.
+        ProgressEvent::LogEntry(entry) => WsEvent::LogEntry {
+            level: entry.level,
+            message: entry.message,
+            run: entry.run,
+        },
+        ProgressEvent::FileStarted { .. }
+        | ProgressEvent::FileProgress { .. }
+        | ProgressEvent::FileDone { .. } => return WsOutput::Skip,
+    };
+    WsOutput::Send(ev)
+}
+
+/// The log line a consumer records when the broadcast channel overran it,
+/// so a burst leaves a visible gap marker instead of a silent hole.
+pub(crate) fn lag_notice(missed: u64, run: u32) -> crate::progress::LogEntry {
+    crate::progress::LogEntry {
+        level: LogLevel::Warning,
+        message: format!(
+            "{missed} progress event(s) dropped under load; the full error list is in the run summary."
+        ),
+        run,
+    }
 }
 
 /// How long the server stays alive after the last WebSocket client goes away.
@@ -148,15 +232,6 @@ pub fn current_dir_rel(state: &AppState) -> Option<String> {
     if rel.is_empty() { None } else { Some(rel) }
 }
 
-/// The wire form of a status: the serde rename the frontend's `SyncStatus`
-/// union is written against.
-fn status_str(status: &crate::progress::SyncStatus) -> String {
-    serde_json::to_value(status)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
-
 async fn handle_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
@@ -185,7 +260,7 @@ async fn handle_socket(
                     eta_secs: p.eta_secs(),
                     ops_done: p.ops_done.load(std::sync::atomic::Ordering::Relaxed),
                     ops_total: p.ops_total.load(std::sync::atomic::Ordering::Relaxed),
-                    status: status_str(&status),
+                    status,
                 };
                 let json = serde_json::to_string(&event).unwrap_or_default();
                 if socket.send(Message::Text(json.into())).await.is_err() {
@@ -203,91 +278,26 @@ async fn handle_socket(
             }
 
             event = rx.recv() => {
-                let ev = match event {
-                    Ok(ProgressEvent::StatusChanged { status }) =>
-                        Some(WsEvent::StatusChanged { status: status_str(&status) }),
-
-                    Ok(ProgressEvent::FileError { name, message }) => {
-                        Some(WsEvent::ErrorOccurred { path: name, message })
+                let out = match event {
+                    Ok(event) => ws_event_for(&state, event),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        let run = state.progress.current_run();
+                        let e = lag_notice(missed, run);
+                        WsOutput::Send(WsEvent::LogEntry { level: e.level, message: e.message, run })
                     }
-
-                    Ok(ProgressEvent::FileDone { .. }) => None,
-
-                    Ok(ProgressEvent::OpDone { path, .. }) => {
-                        let dst_root = state.last_plan.read().unwrap()
-                            .as_ref()
-                            .map(|p| p.dst_root.clone());
-                        let rel_path = dst_root
-                            .map(|root| crate::paths::rel_to_root(std::path::Path::new(&path), &root))
-                            .unwrap_or(path);
-                        pending_completed.push(rel_path);
-                        None
-                    }
-
-                    Ok(ProgressEvent::ScanUpdate { side, file_count }) =>
-                        Some(WsEvent::ScanUpdate { side, file_count }),
-
-                    Ok(ProgressEvent::ScanProgress { phase, path }) => {
-                        let phase_str = match &phase {
-                            ScanPhase::Walking { side } => format!("walking_{side}"),
-                            ScanPhase::Hashing => "hashing".to_owned(),
-                            ScanPhase::Planning => "planning".to_owned(),
-                        };
-                        Some(WsEvent::ScanProgress { phase: phase_str, path })
-                    }
-
-                    Ok(ProgressEvent::DriveMode { hdd }) =>
-                        Some(WsEvent::DriveMode { hdd }),
-
-                    Ok(ProgressEvent::PlanReady) => {
-                        // Read the plan and send it in full so the frontend
-                        // can populate the tables without a separate HTTP call.
-                        let guard = state.last_plan.read().unwrap();
-                        guard.as_ref().map(|plan| {
-                            let s = plan_to_summary(plan);
-                            WsEvent::PlanReady {
-                                ops: s.ops,
-                                copy_count: s.copy_count,
-                                move_count: s.move_count,
-                                delete_count: s.delete_count,
-                                overwrite_count: s.overwrite_count,
-                                identical_count: s.identical_count,
-                                symlink_count: s.symlink_count,
-                                total_bytes: s.total_bytes,
-                                total_ops: s.total_ops,
-                            }
-                        })
-                    }
-
-                    Ok(ProgressEvent::Shutdown) => Some(WsEvent::Shutdown),
-
-                    Ok(ProgressEvent::LogEntry(entry)) => {
-                        // The ring buffer is filled by a single server-side
-                        // task (see gui::server::start), not here: writing it
-                        // per connection duplicated every entry once per open
-                        // tab and buffered nothing at all with no tab open.
-                        let level = serde_json::to_value(&entry.level)
-                            .ok()
-                            .and_then(|v| v.as_str().map(str::to_owned))
-                            .unwrap_or_default();
-                        Some(WsEvent::LogEntry {
-                            level,
-                            message: entry.message,
-                            run: entry.run,
-                        })
-                    }
-
-                    Err(_) => None,
-                    _ => None,
+                    Err(_) => return,
                 };
-
-                if let Some(ev) = ev {
-                    let is_shutdown = matches!(ev, WsEvent::Shutdown);
-                    let json = serde_json::to_string(&ev).unwrap_or_default();
-                    let _ = socket.send(Message::Text(json.into())).await;
-                    if is_shutdown {
-                        return;
+                match out {
+                    WsOutput::Send(ev) => {
+                        let is_shutdown = matches!(ev, WsEvent::Shutdown);
+                        let json = serde_json::to_string(&ev).unwrap_or_default();
+                        let _ = socket.send(Message::Text(json.into())).await;
+                        if is_shutdown {
+                            return;
+                        }
                     }
+                    WsOutput::Completed(rel_path) => pending_completed.push(rel_path),
+                    WsOutput::Skip => {}
                 }
             }
 

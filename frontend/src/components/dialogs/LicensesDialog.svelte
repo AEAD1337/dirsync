@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { trapFocus } from '../../lib/focusTrap';
   import { licenses } from '../../lib/licenses_generated';
   const { onclose }: { onclose: () => void } = $props();
 
@@ -41,13 +42,18 @@
   }
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
-
 <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="dialog">
+  <div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="licenses-title"
+    tabindex="-1"
+    use:trapFocus={{ onclose }}
+  >
     <div class="dialog-header">
-      <h2>Third-Party Licenses</h2>
-      <button class="close-btn" onclick={onclose}>✕</button>
+      <h2 id="licenses-title">Third-Party Licenses</h2>
+      <button type="button" class="close-btn" aria-label="Close" data-autofocus onclick={onclose}>✕</button>
     </div>
     <div class="license-list">
       <div class="license-row header-row">
@@ -94,6 +100,7 @@
     z-index: 200;
   }
   .dialog {
+    outline: none;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;

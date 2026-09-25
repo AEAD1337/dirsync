@@ -2,7 +2,7 @@ use dirsync::sync::fingerprint::hash_file;
 use std::fs;
 use tempfile::TempDir;
 
-// PARTIAL_THRESHOLD = 1 MB (1_048_576 bytes); files ≤ threshold use full read,
+// PARTIAL_THRESHOLD = 1 MB (1_048_576 bytes); files <= threshold use full read,
 // files > threshold use head (first 512 KB) + tail (last 512 KB) only.
 
 #[test]
@@ -86,18 +86,53 @@ fn test_different_content_different_hash() {
     assert_ne!(h1, h2);
 }
 
+/// A 10 MB file is far above PARTIAL_THRESHOLD (1 MB), so only its first and
+/// last 512 KB are read. The hash must be stable, must see a change anywhere
+/// in the head or the tail (including the very first and very last byte),
+/// and must not see a change in the unread middle.
 #[test]
-fn test_large_file_partial_hash() {
+fn test_large_file_partial_hash_covers_exactly_head_and_tail() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("large.bin");
+    let size: usize = 10 * 1024 * 1024;
+    let chunk: usize = 512 * 1024;
+    let base = vec![0xABu8; size];
+    let hash_of = |name: &str, data: &[u8]| {
+        let path = dir.path().join(name);
+        fs::write(&path, data).unwrap();
+        hash_file(&path, data.len() as u64).unwrap()
+    };
+    let flipped = |at: usize| {
+        let mut d = base.clone();
+        d[at] ^= 0xFF;
+        d
+    };
 
-    // Create a 10 MB file (above 8 MB threshold → partial hash)
-    let data = vec![0xABu8; 10 * 1024 * 1024];
-    fs::write(&path, &data).unwrap();
+    let h = hash_of("base.bin", &base);
+    assert_eq!(h, hash_of("again.bin", &base), "hash must be deterministic");
 
-    let h1 = hash_file(&path, data.len() as u64).unwrap();
-    let h2 = hash_file(&path, data.len() as u64).unwrap();
-    assert_eq!(h1, h2);
+    for (label, at) in [
+        ("first byte", 0),
+        ("last head byte", chunk - 1),
+        ("first tail byte", size - chunk),
+        ("last byte", size - 1),
+    ] {
+        assert_ne!(
+            h,
+            hash_of("changed.bin", &flipped(at)),
+            "a change at the {label} (offset {at}) must change the hash"
+        );
+    }
+    for (label, at) in [
+        ("first unread byte", chunk),
+        ("middle", size / 2),
+        ("last unread byte", size - chunk - 1),
+    ] {
+        assert_eq!(
+            h,
+            hash_of("unread.bin", &flipped(at)),
+            "a change at the {label} (offset {at}) lies outside head and tail"
+        );
+    }
 }
 
 #[test]
@@ -130,5 +165,21 @@ fn test_different_sizes_same_head_tail_different_hash() {
     assert_ne!(
         ha, hb,
         "files with different sizes must hash differently even when head+tail bytes are identical"
+    );
+}
+
+#[test]
+fn hashing_reads_no_more_than_the_walked_size() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("grows.log");
+    std::fs::write(&path, b"0123456789").unwrap();
+    let at_walk = dirsync::sync::fingerprint::hash_file(&path, 10).unwrap();
+
+    // The file grew between the walk and the hash (an active log).
+    std::fs::write(&path, b"0123456789 and a lot more since the walk").unwrap();
+
+    assert_eq!(
+        dirsync::sync::fingerprint::hash_file(&path, 10).unwrap(),
+        at_walk
     );
 }

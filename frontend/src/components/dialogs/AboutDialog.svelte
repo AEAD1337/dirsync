@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { trapFocus } from '../../lib/focusTrap';
+
   const profile = typeof __BUILD_PROFILE__ !== 'undefined' ? __BUILD_PROFILE__ : 'debug';
   const version = (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.1.0')
     + ` (${profile} build)`;
@@ -16,10 +18,15 @@
   const { onclose }: { onclose: () => void } = $props();
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
-
 <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="dialog">
+  <div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="about-title"
+    tabindex="-1"
+    use:trapFocus={{ onclose }}
+  >
     <div class="logo-wrap">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="64" height="64" style="border-radius:14px;">
         <rect width="100" height="100" rx="18" fill="#1E40AF"/>
@@ -27,7 +34,7 @@
         <path d="M8 62 L60 62 L60 54 L88 69 L60 84 L60 76 L8 76 Z" fill="white"/>
       </svg>
     </div>
-    <h2>dirsync</h2>
+    <h2 id="about-title">dirsync</h2>
     <p>One-way directory mirror sync with smart rename/move detection.</p>
     <table>
       <tbody>
@@ -44,7 +51,7 @@
         </tr>
       </tbody>
     </table>
-    <button onclick={onclose}>Close</button>
+    <button type="button" data-autofocus onclick={onclose}>Close</button>
   </div>
 </div>
 
@@ -59,6 +66,7 @@
     z-index: 200;
   }
   .dialog {
+    outline: none;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;

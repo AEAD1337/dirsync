@@ -1,4 +1,4 @@
-use super::planner::{OP_TOKEN_BYTES, SyncOp, SyncPlan};
+use super::planner::{LinkKind, OP_TOKEN_BYTES, SyncOp, SyncPlan};
 use crate::error::SkipLog;
 use crate::progress::{ProgressEvent, ProgressState, SyncStatus};
 use anyhow::Result;
@@ -47,6 +47,85 @@ fn clear_symlink_at(dst: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Clear the Windows readonly attribute on an existing regular file. A
+/// readonly DST file (mirrored from a readonly SRC file) otherwise fails
+/// every later rename onto it and every mtime write with "Access is denied".
+/// Unix readonly modes block neither for the owner, so this is Windows-only.
+#[cfg(windows)]
+fn clear_readonly(path: &Path) -> std::io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && meta.permissions().readonly() => {
+            let mut perms = meta.permissions();
+            // Clearing the attribute is exactly the intent on Windows.
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            fs::set_permissions(path, perms)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+#[cfg(not(windows))]
+fn clear_readonly(_path: &Path) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+/// Run `f` against `path` with its readonly attribute lifted, restoring it
+/// afterwards (TouchMtime on a readonly mirror).
+fn with_writable<T>(path: &Path, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    let was_readonly = clear_readonly(path)?;
+    let result = f();
+    if was_readonly {
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(path, perms)?;
+    }
+    result
+}
+
+/// Stage a copy of `src` via `write` (which fills the staging path it is
+/// given), then commit it over `dst` with one atomic rename. Shared by both
+/// copy paths so they cannot drift apart on safety or metadata:
+///
+/// - A source whose size or mtime changed while it was being copied (a
+///   database or VM image rewritten in place) fails the op. Committing it
+///   would leave a torn copy that every later run calls Identical, because
+///   the fast path compares exactly those two fields.
+/// - The copy carries the mtime and permissions the source had *before* the
+///   copy, whichever path wrote it (`fs::copy` mirrors attributes on its own,
+///   the chunked loop does not).
+/// - A readonly DST file is replaced rather than failing forever.
+/// - Any failure removes the staging file: left behind it litters DST.
+pub(crate) fn stage_and_commit(
+    src: &Path,
+    dst: &Path,
+    write: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let before = fs::metadata(src)?;
+    let tmp = tmp_path_for(dst);
+    let staged = (|| -> Result<()> {
+        write(&tmp)?;
+        let after = fs::metadata(src)?;
+        if after.len() != before.len() || after.modified().ok() != before.modified().ok() {
+            anyhow::bail!("source changed during copy; not committed, the next run retries it");
+        }
+        clear_readonly(&tmp)?;
+        if let Ok(mtime) = before.modified() {
+            set_file_mtime(&tmp, FileTime::from_system_time(mtime))?;
+        }
+        fs::set_permissions(&tmp, before.permissions())?;
+        clear_symlink_at(dst)?;
+        clear_readonly(dst)?;
+        fs::rename(&tmp, dst)?;
+        Ok(())
+    })();
+    if staged.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    staged
+}
+
 /// Files at or below this size use fs::copy (single syscall, no chunk loop)
 /// and are executed in parallel. Above it, the chunked progress-aware path runs.
 const SMALL_FILE: u64 = 1024 * 1024; // 1 MB
@@ -74,7 +153,6 @@ fn write_target(op: &SyncOp) -> &Path {
         SyncOp::RmDir { path } => path,
         SyncOp::TouchMtime { dst, .. } => dst,
         SyncOp::Symlink { dst, .. } => dst,
-        #[cfg(windows)]
         SyncOp::CaseRename { to, .. } => to.as_path(),
     }
 }
@@ -88,13 +166,26 @@ pub async fn execute(
 ) -> SkipLog {
     let mut skip_log = SkipLog::default();
 
-    // Safety gate: every write target must be inside dst_root.
-    // The planner builds all targets from dst_root, but we verify here so that
-    // a future planner bug or a crafted CLI invocation can never cause writes
-    // into SRC or any other unrelated directory.
+    // Safety gate: every path an op writes or removes must be inside
+    // dst_root. The planner builds all of them from dst_root, but we verify
+    // here so that a future planner bug or a crafted CLI invocation can never
+    // touch SRC or any other unrelated directory. A rename's source counts:
+    // the file disappears from there. `..` is refused outright because
+    // `starts_with` is purely textual.
     for op in &plan.ops {
-        let target = write_target(op);
-        if !target.starts_with(&plan.dst_root) {
+        let escapes = |p: &Path| {
+            !p.starts_with(&plan.dst_root)
+                || p.components().any(|c| c == std::path::Component::ParentDir)
+        };
+        let source = match op {
+            SyncOp::Move { from, .. } | SyncOp::CaseRename { from, .. } => Some(from.as_path()),
+            _ => None,
+        };
+        let target = match source {
+            Some(from) if escapes(from) => from,
+            _ => write_target(op),
+        };
+        if escapes(target) {
             let msg = format!(
                 "SAFETY: refusing to execute op whose target '{}' is outside dst_root '{}': aborting run",
                 target.display(),
@@ -120,7 +211,6 @@ pub async fn execute(
     // Partition into ordered execution phases
     let mut mkdirs: Vec<SyncOp> = vec![];
     let mut moves: Vec<SyncOp> = vec![];
-    #[cfg(windows)]
     let mut case_renames: Vec<SyncOp> = vec![];
     let mut symlinks: Vec<SyncOp> = vec![];
     let mut copies: Vec<SyncOp> = vec![];
@@ -131,7 +221,6 @@ pub async fn execute(
         match op {
             SyncOp::MkDir { .. } => mkdirs.push(op),
             SyncOp::Move { .. } => moves.push(op),
-            #[cfg(windows)]
             SyncOp::CaseRename { .. } => case_renames.push(op),
             SyncOp::Symlink { .. } => symlinks.push(op),
             SyncOp::Copy { .. } | SyncOp::Overwrite { .. } => copies.push(op),
@@ -157,7 +246,7 @@ pub async fn execute(
         (vec![], deletes)
     } else {
         deletes.into_iter().partition(|op| match op {
-            SyncOp::Delete { path, .. } => write_targets.iter().any(|t| path.starts_with(t)),
+            SyncOp::Delete { path, .. } => path.ancestors().any(|a| write_targets.contains(a)),
             _ => false,
         })
     };
@@ -165,7 +254,7 @@ pub async fn execute(
         (vec![], rmdirs)
     } else {
         rmdirs.into_iter().partition(|op| match op {
-            SyncOp::RmDir { path } => write_targets.iter().any(|t| path.starts_with(t)),
+            SyncOp::RmDir { path } => path.ancestors().any(|a| write_targets.contains(a)),
             _ => false,
         })
     };
@@ -197,7 +286,7 @@ pub async fn execute(
     // target and make the dir move fail, so they run right after the moves.
     let (post_move_mkdirs, mkdirs): (Vec<_>, Vec<_>) = mkdirs.into_iter().partition(|op| {
         if let SyncOp::MkDir { path } = op {
-            dir_move_targets.iter().any(|t| path.starts_with(t))
+            path.ancestors().any(|a| dir_move_targets.contains(a))
         } else {
             false
         }
@@ -207,14 +296,16 @@ pub async fn execute(
         planned_bytes + extra_ops as u64 * OP_TOKEN_BYTES,
         planned_ops + extra_ops,
     );
+    let ctl = Control {
+        progress: &progress,
+        opts,
+        pause_rx: &pause_rx,
+        cancel_rx: &cancel_rx,
+    };
 
     // Phase 1: MkDir: serial (must precede all writes, very fast)
-    for op in mkdirs {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(mkdirs, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
     // Phase 1.5: clear DST directories that sit where a write op will land, by
@@ -222,16 +313,54 @@ pub async fn execute(
     // from the planner). A non-empty directory left by excluded content still
     // survives RmDir, and the write then fails with a clear error rather than
     // silently destroying data the user excluded.
-    for op in blocking_write_deletes
-        .into_iter()
-        .chain(blocking_write_rmdirs)
+    if !run_serial(
+        blocking_write_deletes
+            .into_iter()
+            .chain(blocking_write_rmdirs),
+        &ctl,
+        &mut skip_log,
+    )
+    .await
     {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
+    // A directory that survived its RmDir still holds content the plan never
+    // touches (excluded names): report what blocks it, and drop the writes
+    // that would only fail against it with a bare "Access is denied".
+    let still_blocked: std::collections::HashSet<PathBuf> = if opts.dry_run {
+        Default::default()
+    } else {
+        write_targets
+            .iter()
+            .filter(|t| fs::symlink_metadata(t).is_ok_and(|m| m.is_dir()))
+            .cloned()
+            .collect()
+    };
+    for dir in &still_blocked {
+        let names: Vec<String> = fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .take(3)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let msg = format!(
+            "cannot replace this directory: it still holds content excluded from sync ({})",
+            names.join(", ")
+        );
+        skip_log.push(dir.clone(), msg.clone());
+        progress.emit(ProgressEvent::FileError {
+            name: dir.display().to_string(),
+            message: msg,
+        });
+    }
+    let not_blocked = |op: &SyncOp| !still_blocked.contains(write_target(op));
+    copies.retain(not_blocked);
+    symlinks.retain(not_blocked);
+    let sorted_file_moves: Vec<SyncOp> =
+        sorted_file_moves.into_iter().filter(not_blocked).collect();
+    let dir_moves: Vec<SyncOp> = dir_moves.into_iter().filter(not_blocked).collect();
 
     // Phase 2: Moves: serial (rename is near-instant, no benefit from parallelism)
     // File-level moves run first, topologically sorted to handle chains and
@@ -254,57 +383,43 @@ pub async fn execute(
         }
     });
 
-    for op in blocking_deletes {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(blocking_deletes, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
     let moves: Vec<_> = sorted_file_moves.into_iter().chain(dir_moves).collect();
 
-    for op in moves {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(moves, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
     // Phase 2.1: MkDirs inside renamed subtrees: deferred until after the
     // dir moves that create their parents (see partition above).
-    for op in post_move_mkdirs {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(post_move_mkdirs, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
-    // Phase 2.5: CaseRenames: serial; two-step rename to force case update on NTFS.
-    // Dir case renames run first so their children resolve correctly in Phase 3.
-    #[cfg(windows)]
+    // Phase 2.5: CaseRenames: serial; two-step rename to force the case
+    // update on a case-insensitive filesystem. Dir case renames run first so
+    // their children resolve correctly in Phase 3.
     {
         let (dir_case_renames, file_case_renames): (Vec<_>, Vec<_>) = case_renames
             .into_iter()
             .partition(|op| matches!(op, SyncOp::CaseRename { is_dir: true, .. }));
-        for op in dir_case_renames.into_iter().chain(file_case_renames) {
-            if *cancel_rx.borrow() {
-                return set_status(skip_log, SyncStatus::Cancelled, &progress);
-            }
-            wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-            run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+        if !run_serial(
+            dir_case_renames.into_iter().chain(file_case_renames),
+            &ctl,
+            &mut skip_log,
+        )
+        .await
+        {
+            return set_status(skip_log, SyncStatus::Cancelled, &progress);
         }
     }
 
     // Phase 3: Symlinks: serial, near-instant (no data to copy).
-    for op in symlinks {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(symlinks, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
     // Phase 3a: small copies.
@@ -316,12 +431,8 @@ pub async fn execute(
 
     if opts.hdd {
         // Serial path: reuse run_one so the progress accounting is identical.
-        for op in small_copies {
-            if *cancel_rx.borrow() {
-                return set_status(skip_log, SyncStatus::Cancelled, &progress);
-            }
-            wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-            run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+        if !run_serial(small_copies, &ctl, &mut skip_log).await {
+            return set_status(skip_log, SyncStatus::Cancelled, &progress);
         }
     } else if !small_copies.is_empty() {
         let sem = Arc::new(Semaphore::new(COPY_JOBS));
@@ -374,41 +485,64 @@ pub async fn execute(
     }
 
     // Phase 3b: large copies: sequential, with per-chunk progress reporting.
-    for op in large_copies {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(large_copies, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
     // Phase 3c: TouchMtime: serial, cheap metadata-only writes.
-    for op in touches {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(touches, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
     // Phase 4: Deletes: serial
-    for op in deletes {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        wait_if_paused(&pause_rx, &cancel_rx, &progress).await;
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(deletes, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
     // Phase 5: RmDir: serial (deepest-first order from planner)
-    for op in rmdirs {
-        if *cancel_rx.borrow() {
-            return set_status(skip_log, SyncStatus::Cancelled, &progress);
-        }
-        run_one(op, &progress, opts, &mut skip_log, &cancel_rx).await;
+    if !run_serial(rmdirs, &ctl, &mut skip_log).await {
+        return set_status(skip_log, SyncStatus::Cancelled, &progress);
     }
 
-    set_status(skip_log, SyncStatus::Done, &progress)
+    // A cancel that interrupted the final op (a long copy polls it mid-file)
+    // passed every between-op check: the run did not finish, so it must not
+    // read as Done.
+    let status = if *cancel_rx.borrow() {
+        SyncStatus::Cancelled
+    } else {
+        SyncStatus::Done
+    };
+    set_status(skip_log, status, &progress)
+}
+
+/// What every serial phase needs to run its ops.
+struct Control<'a> {
+    progress: &'a Arc<ProgressState>,
+    opts: ExecuteOptions,
+    pause_rx: &'a watch::Receiver<bool>,
+    cancel_rx: &'a watch::Receiver<bool>,
+}
+
+/// Run `ops` one at a time, honouring pause and cancel between them.
+/// Returns `false` when a cancel stopped the phase.
+async fn run_serial(
+    ops: impl IntoIterator<Item = SyncOp>,
+    ctl: &Control<'_>,
+    skip_log: &mut SkipLog,
+) -> bool {
+    for op in ops {
+        if *ctl.cancel_rx.borrow() {
+            return false;
+        }
+        wait_if_paused(ctl.pause_rx, ctl.cancel_rx, ctl.progress).await;
+        // A cancel that arrived while paused must stop the op the run was
+        // paused in front of, not just the ones after it.
+        if *ctl.cancel_rx.borrow() {
+            return false;
+        }
+        run_one(op, ctl.progress, ctl.opts, skip_log, ctl.cancel_rx).await;
+    }
+    true
 }
 
 /// Topologically sort file-level move operations so that they execute in a
@@ -585,6 +719,9 @@ async fn run_one(
                 path: path.to_string_lossy().into_owned(),
             });
         }
+        // A cancel that interrupts an op (the chunked copy's sentinel) is the
+        // user's decision, not a failure of that file.
+        Err(e) if *cancel_rx.borrow() && e.to_string() == "cancelled" => {}
         Err(e) => {
             skip_log.push(path.clone(), e.to_string());
             progress.emit(ProgressEvent::FileError {
@@ -650,7 +787,7 @@ async fn execute_op(
             Ok(format!("delete {}", path.display()))
         }
 
-        SyncOp::Symlink { target, dst } => {
+        SyncOp::Symlink { target, dst, kind } => {
             if !dry_run {
                 if let Some(parent) = dst.parent() {
                     fs::create_dir_all(parent)?;
@@ -659,7 +796,7 @@ async fn execute_op(
                 if dst.symlink_metadata().is_ok() {
                     fs::remove_file(&dst).or_else(|_| fs::remove_dir(&dst))?;
                 }
-                create_symlink(&target, &dst)?;
+                create_link(&target, &dst, kind)?;
             }
             Ok(format!("symlink {} -> {}", dst.display(), target.display()))
         }
@@ -673,14 +810,18 @@ async fn execute_op(
             }
             Ok(format!("move {} -> {}", from.display(), to.display()))
         }
-
-        #[cfg(windows)]
         SyncOp::CaseRename { from, to, .. } => {
             if !dry_run {
                 let fname = from.file_name().unwrap_or_default().to_string_lossy();
                 let tmp = from.with_file_name(format!("{}.__dirsync_case__", fname));
                 fs::rename(&from, &tmp)?;
-                fs::rename(&tmp, &to)?;
+                // Put it back under its old name when the second step fails:
+                // left at the staging name, the walk (which excludes that
+                // suffix) would never see it again.
+                if let Err(e) = fs::rename(&tmp, &to) {
+                    let _ = fs::rename(&tmp, &from);
+                    return Err(e.into());
+                }
             }
             Ok(format!(
                 "case-rename {} -> {}",
@@ -701,7 +842,9 @@ async fn execute_op(
             if !dry_run {
                 let meta = fs::metadata(&src)?;
                 let mtime = meta.modified()?;
-                set_file_mtime(&dst, FileTime::from_system_time(mtime))?;
+                with_writable(&dst, || {
+                    set_file_mtime(&dst, FileTime::from_system_time(mtime))
+                })?;
             }
             Ok(format!("touch-mtime {}", dst.display()))
         }
@@ -786,25 +929,10 @@ async fn do_copy_small(op: SyncOp, progress: &Arc<ProgressState>, dry_run: bool)
                 if let Some(parent) = dst.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let tmp = tmp_path_for(&dst);
-                // Leaving a stale temp file behind on failure litters DST and
-                // lets it take part in the *next* run's rename detection.
-                let staged = (|| -> Result<()> {
-                    fs::copy(&src, &tmp)?;
-                    clear_symlink_at(&dst)?;
-                    fs::rename(&tmp, &dst)?;
+                stage_and_commit(&src, &dst, |tmp| {
+                    fs::copy(&src, tmp)?;
                     Ok(())
-                })();
-                if staged.is_err() {
-                    let _ = fs::remove_file(&tmp);
-                }
-                staged?;
-                if let Ok(meta) = fs::metadata(&src)
-                    && let Ok(mtime) = meta.modified()
-                {
-                    let _ = set_file_mtime(&dst, FileTime::from_system_time(mtime));
-                }
-                Ok(())
+                })
             }
         })
         .await??;
@@ -832,12 +960,9 @@ async fn copy_with_progress(
     let cancel_rx = cancel_rx.clone();
 
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let tmp = tmp_path_for(&dst);
-        // Any early exit below must not leave the staging file behind: it
-        // litters DST and would take part in the next run's rename detection.
-        let staged = (|| -> Result<()> {
+        stage_and_commit(&src, &dst, |tmp| {
             let mut src_file = fs::File::open(&src)?;
-            let mut dst_file = fs::File::create(&tmp)?;
+            let mut dst_file = fs::File::create(tmp)?;
 
             let mut buf = vec![0u8; COPY_BUF];
             let mut written = 0u64;
@@ -867,23 +992,14 @@ async fn copy_with_progress(
                     last_event = Instant::now();
                 }
             }
-            drop(dst_file);
-            clear_symlink_at(&dst)?;
-            fs::rename(&tmp, &dst)?;
+            // Durable before the rename publishes it: after a power loss a
+            // renamed-but-unflushed file can read back zero-filled while
+            // already carrying the source's mtime, which the fast path would
+            // then call Identical forever. Small files skip this: one flush
+            // per file would dominate a run of thousands of them.
+            dst_file.sync_all()?;
             Ok(())
-        })();
-        if staged.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        staged?;
-        // Preserve source mtime on the destination.
-        if let Ok(meta) = fs::metadata(&src)
-            && let Ok(mtime) = meta.modified()
-        {
-            let ft = FileTime::from_system_time(mtime);
-            let _ = set_file_mtime(&dst, ft);
-        }
-        Ok(())
+        })
     })
     .await??;
 
@@ -891,21 +1007,138 @@ async fn copy_with_progress(
 }
 
 #[cfg(unix)]
-fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+fn create_link(target: &Path, link: &Path, _kind: LinkKind) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
 #[cfg(windows)]
-fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    // Windows needs separate APIs for file vs directory symlinks; try file first.
-    std::os::windows::fs::symlink_file(target, link)
-        .or_else(|_| std::os::windows::fs::symlink_dir(target, link))
+fn create_link(target: &Path, link: &Path, kind: LinkKind) -> std::io::Result<()> {
+    // Windows fixes a link's file/dir nature at creation, and CreateSymbolicLink
+    // never checks the target: guessing "file first" turned every directory
+    // link into a file link that cannot be opened as a directory.
+    match kind {
+        LinkKind::File => std::os::windows::fs::symlink_file(target, link),
+        LinkKind::Dir => std::os::windows::fs::symlink_dir(target, link),
+        LinkKind::Junction => junction::create(target, link),
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+fn create_link(_target: &Path, _link: &Path, _kind: LinkKind) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "symlinks not supported on this platform",
     ))
+}
+
+/// NTFS junctions (mount-point reparse points). std reports them as
+/// directory symlinks, but recreating one as a symlink needs
+/// SeCreateSymbolicLinkPrivilege, which ordinary users lack: every run
+/// failed with os error 1314 and the junction never arrived.
+#[cfg(windows)]
+pub(crate) mod junction {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+    };
+    use windows::Win32::System::IO::DeviceIoControl;
+    use windows::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+    use windows::core::PCWSTR;
+
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+
+    /// Open the reparse point itself, never what it points at.
+    fn open(path: &Path, access: u32) -> windows::core::Result<HANDLE> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            CreateFileW(
+                PCWSTR::from_raw(wide.as_ptr()),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+        }
+    }
+
+    pub(crate) fn is_junction(path: &Path) -> bool {
+        let Ok(handle) = open(path, 0) else {
+            return false;
+        };
+        let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileAttributeTagInfo,
+                (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        }
+        .is_ok();
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        ok && info.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT
+    }
+
+    /// Create a junction at `link` pointing at the absolute `target`: an
+    /// empty directory turned into a mount-point reparse point.
+    pub(crate) fn create(target: &Path, link: &Path) -> std::io::Result<()> {
+        // read_link reports a junction's target as `\\?\C:\...`; the reparse
+        // data wants the NT form `\??\C:\...` plus a plain display name.
+        let target = target.to_string_lossy();
+        let plain = target.strip_prefix(r"\\?\").unwrap_or(&target);
+        let substitute: Vec<u16> = format!(r"\??\{plain}").encode_utf16().collect();
+        let print: Vec<u16> = plain.encode_utf16().collect();
+
+        // REPARSE_DATA_BUFFER, MountPointReparseBuffer variant. Offsets and
+        // lengths are in bytes, relative to PathBuffer; both names are
+        // NUL-terminated in the buffer but the lengths exclude the NUL.
+        let sub_len = (substitute.len() * 2) as u16;
+        let print_len = (print.len() * 2) as u16;
+        let path_bytes = (substitute.len() + 1 + print.len() + 1) * 2;
+        let data_len = (8 + path_bytes) as u16;
+        let mut buf: Vec<u8> = Vec::with_capacity(8 + data_len as usize);
+        buf.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        for v in [0, sub_len, sub_len + 2, print_len] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        for unit in substitute.iter().chain(&[0]).chain(&print).chain(&[0]) {
+            buf.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        std::fs::create_dir(link)?;
+        let result = open(link, GENERIC_WRITE).and_then(|handle| {
+            let r = unsafe {
+                DeviceIoControl(
+                    handle,
+                    FSCTL_SET_REPARSE_POINT,
+                    Some(buf.as_ptr().cast()),
+                    buf.len() as u32,
+                    None,
+                    0,
+                    None,
+                    None,
+                )
+            };
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            r
+        });
+        if let Err(e) = result {
+            let _ = std::fs::remove_dir(link);
+            return Err(std::io::Error::other(e));
+        }
+        Ok(())
+    }
 }

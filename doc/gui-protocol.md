@@ -1,6 +1,12 @@
 # GUI Protocol
 
-The GUI is served by an embedded axum HTTP server, default port 7373, bound to `127.0.0.1` only. All API and WebSocket routes require a same-origin `Origin` header: requests from other origins receive `403 Forbidden`.
+The GUI is served by an embedded axum HTTP server, default port 7373, bound to `127.0.0.1` only. Every API and WebSocket request passes three checks (`require_session` in `server.rs`):
+
+1. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`, else `403 Forbidden` (DNS rebinding).
+2. An `Origin` header, when present, must be `http://127.0.0.1:<port>` or `http://localhost:<port>`, else `403` (browser CSRF).
+3. The per-launch session token must match, else `401 Unauthorized`. The server generates 128 random bits at startup and opens the browser at `http://127.0.0.1:<port>/#t=<token>` (the URL is also printed to the console). The page moves the token from the fragment into `sessionStorage` and sends it as an `X-Dirsync-Token` header on every fetch, and as a `token` query parameter on the WebSocket (`/ws?token=<token>`), whose browser API cannot set headers. Headers are trivial to forge for any local process, and loopback is shared by every user of the machine: the token is what keeps another local user from driving this server, which runs as you.
+
+Static assets (the page itself) need no token: the page has to load before it can read the token from its own URL, and the assets contain nothing secret.
 
 ---
 
@@ -16,14 +22,14 @@ Returns the current `AppConfig`.
 ```json
 {
   "port": 7373,
-  "theme": "system",
+  "theme": "light",
   "exclude_patterns": [],
   "last_src": "/path/to/src/",
   "last_dst": "/path/to/dst/"
 }
 ```
 
-`theme` is one of `"light"`, `"dark"`, `"system"`. `last_src` / `last_dst` are `null` when not yet set.
+`theme` is one of `"light"` (the default), `"dark"`, `"system"` (follows the OS dark-mode setting live). `last_src` / `last_dst` are `null` when not yet set. Patterns given with `-e` on the command line appear in `exclude_patterns` for the session but are never written to the file.
 
 #### `PUT /api/v1/config`
 Partial update. Body: any subset of `port`, `exclude_patterns`, `theme`; absent fields keep their current value. `last_src` / `last_dst` are not accepted: the server records them on every preview, and a whole-config PUT built from a stale client snapshot used to overwrite them. Returns the full merged config, `400` for a port outside 1024-65535, or `500` if the file could not be written.
@@ -44,9 +50,9 @@ Request:
 }
 ```
 
-Both paths must end with a directory separator. The server validates that both paths exist, are directories, and are not nested inside each other. `last_src` / `last_dst` in the config are updated as a side effect.
+Both paths must end with a directory separator. The server validates that both paths exist, are directories, are not system-critical (unless `--yolo`) and are not nested inside each other; a failure returns `400 Bad Request` with the reason as the body, synchronously, with no WebSocket event. `409 Conflict` means a run or another preview is in progress. `last_src` / `last_dst` in the config are updated as a side effect.
 
-On success the server emits `drive_mode` immediately after detecting drive types, then `scan_update` events during the walk, then `plan_ready` when done. On error it emits an `error_occurred` event and resets status to `idle`.
+On success the server emits `drive_mode` immediately after detecting drive types, then `scan_update` events during the walk, then `plan_ready` when done, and only then the `status_changed` to `idle` (the plan is stored before the status is released). A SRC or DST root that cannot be read fails the preview. A directory *below* the root that cannot be read is logged as a warning: nothing at or below its DST counterpart is deleted or used as a move source. On any other error the server emits `preview_failed` and resets status to `idle`.
 
 #### `GET /api/v1/plan`
 Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no preview has been run yet.
@@ -86,7 +92,7 @@ Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no 
 }
 ```
 
-`kind` values: `"copy"`, `"overwrite"`, `"move"`, `"dir-rename"`, `"case-rename"`, `"delete"`, `"symlink"`, `"touch"`. A `touch` (badge `~`, `size` 0) is a timestamp correction on an existing DST file; it gets a row because it writes to a user file. `MkDir` and `RmDir` ops are not included in the ops list (they are infrastructure; the GUI does not display them individually): but they **are** counted in `total_ops`, which is the whole plan's op count and therefore the same denominator the progress bar reports as `ops_total`. `total_ops` is consequently `>= ops.length`. `hash` is a hex-encoded SHA-256, present only when it was computed during matching. `from_path` is present only for `move`, `dir-rename`, and `case-rename`. `"case-rename"` is only emitted on Windows (NTFS case-only renames); `size` is always `0` for this kind.
+`kind` values: `"copy"`, `"overwrite"`, `"move"`, `"dir-rename"`, `"case-rename"`, `"delete"`, `"symlink"`, `"touch"`. A `touch` (badge `~`, `size` 0) is a timestamp correction on an existing DST file; it gets a row because it writes to a user file. `MkDir` and `RmDir` ops are not included in the ops list (they are infrastructure; the GUI does not display them individually): but they **are** counted in `total_ops`, which is the whole plan's op count and therefore the same denominator the progress bar reports as `ops_total`. `total_ops` is consequently `>= ops.length`. `hash` is a hex-encoded SHA-256, present only when it was computed during matching. `from_path` is present only for `move`, `dir-rename`, and `case-rename`. `"case-rename"` is only emitted when the DST filesystem resolves names ignoring case (NTFS, APFS by default, exFAT, most SMB shares: probed at preview time, not assumed from the OS); `size` is always `0` for this kind.
 
 `total_bytes` is the progress-bar denominator: it is the sum of actual file bytes for copy/overwrite ops **plus** a 128 KB virtual token (`OP_TOKEN_BYTES`) per non-copy op (moves, deletes, mkdirs, rmdirs, symlinks, mtime touches). The token ensures all op types advance the progress bar, not just file copies.
 
@@ -95,16 +101,18 @@ Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no 
 ### Run
 
 #### `POST /api/v1/run`
-Starts executing the last computed plan. Returns `202 Accepted`, or `409 Conflict` if a sync is already running, or `400 Bad Request` if no plan exists. A plan that ran to completion is dropped server-side: running again requires a new preview (a cancelled or dry run keeps it).
+Starts executing the last computed plan. Returns `202 Accepted`; `409 Conflict` if a sync is already running, if a preview is in progress, or if `src`/`dst` differ from the stored plan's roots (the user edited the paths after previewing); `400 Bad Request` if no plan exists. A real run drops the plan server-side whether it finished or was cancelled: nothing records which ops already ran, so a replay would redo every completed move and delete and fail them against the correct files. Running again requires a new preview. A dry run changes nothing and keeps the plan.
 
 Request:
 ```json
-{ "dry_run": false, "skip_prefixes": ["photos/2023"] }
+{ "dry_run": false, "skip_prefixes": ["photos/2023"], "src": "/absolute/path/to/src/", "dst": "/absolute/path/to/dst/" }
 ```
+
+`src` and `dst` are required and must equal the paths of the preview that produced the plan.
 
 `skip_prefixes` is optional (defaults to `[]`). Each entry is a forward-slash path relative to `dst_root`, as shown in the preview. Write ops at or below any prefix are dropped from the plan before execution and the plan's counts and `total_bytes` are recomputed; `delete` and `rmdir` ops are kept, because skipping a source directory suppresses writes into DST rather than cancelling cleanup of DST orphans. The stored plan is not modified: filtering applies to a clone, so running again without the prefixes needs no new preview.
 
-Progress is delivered over WebSocket. Run completion is signalled by a `progress_update` event where `status` is `"done"` or `"cancelled"`.
+Progress is delivered over WebSocket. Run completion is signalled by a `status_changed` (and the next `progress_update`) with status `"done"` or `"cancelled"`. A cancel always ends in `"cancelled"`, including one that interrupts the last op, and is not reported as a file error.
 
 ---
 
@@ -136,7 +144,7 @@ Request:
 { "path": "/home/user/", "dir_only": true }
 ```
 
-If `path` does not exist, the server walks up to the nearest readable ancestor. Returns up to 500 entries, sorted directories first then alphabetically. Hidden *files* (names starting with `.`) are skipped, but hidden directories are listed so they remain navigable. `dir_only: true` drops regular files entirely.
+If `path` does not exist, the server walks up to the nearest readable ancestor. Returns up to 500 entries, sorted directories first then alphabetically. Hidden *files* (names starting with `.`) are skipped, but hidden directories are listed so they remain navigable. `dir_only: true` drops regular files entirely. Entries whose names are not valid Unicode are skipped: they cannot travel through JSON and back as a path the server could open again.
 
 ```json
 {
@@ -152,9 +160,9 @@ If `path` does not exist, the server walks up to the nearest readable ancestor. 
 Returns up to 12 directory path completions for the typed prefix. Used for the inline path input autocomplete.
 
 Request: `{ "path": "/home/us" }`  
-Response: `{ "completions": ["/home/user/", "/home/usr/"] }`
+Response: `{ "completions": ["/home/user", "/home/usr"] }`
 
-Only directories are completed, and unlike `/browse` this endpoint does skip dotted ones. Matching on the final component is case-insensitive.
+Only directories are completed, and unlike `/browse` this endpoint does skip dotted ones. Completions carry no trailing separator. Matching on the final component is case-insensitive. An empty `path` returns the filesystem roots: every existing drive root on Windows (not capped at 12), the entries of `/` elsewhere.
 
 #### `POST /api/v1/stat`
 Lightweight existence check.
@@ -176,15 +184,18 @@ Returns platform metadata the frontend needs on startup.
 ### Log
 
 #### `GET /api/v1/log`
-Returns the in-memory log ring buffer as an ordered array of entries (oldest first). Capped at 2000 entries. Use this on modal open to populate history; subscribe to the WebSocket `log_entry` event for live updates.
+Returns the in-memory log ring buffer as an ordered array of entries (oldest first). Capped at 2000 entries. The frontend fetches it once at startup and merges live `log_entry` events into it.
 
 ```json
 [
-  { "level": "info",    "message": "Copied 3 files, moved 1, deleted 2.", "run": 1 },
-  { "level": "warning", "message": "Symlink skipped: target outside dst.",  "run": 1 },
-  { "level": "error",   "message": "2 file(s) had errors and were skipped:", "run": 1 }
+  { "level": "info",    "message": "3 copies. 1 move. 2 deletes. 3.4 MB to transfer.", "run": 1 },
+  { "level": "warning", "message": "Walk error: IO error for operation on C:\\src\\locked: Access is denied. (os error 5)", "run": 1 },
+  { "level": "error",   "message": "  C:\\dst\\locked.db: Access is denied. (os error 5)", "run": 1 },
+  { "level": "error",   "message": "1 file(s) had errors and were skipped (listed above).", "run": 1 }
 ]
 ```
+
+After a run with failures the per-file lines come first and the summary line last: when a burst overruns a slow consumer of the broadcast channel, the *oldest* events are dropped, and the summary is the line that must survive. A consumer that falls behind records a warning entry saying how many events it missed, so the gap is visible.
 
 `level` is one of `"info"`, `"warning"`, `"error"`. `run` is a monotonically increasing integer, incremented once per preview start; it is used to group entries and render separator lines between runs.
 
@@ -192,7 +203,7 @@ Returns the in-memory log ring buffer as an ordered array of entries (oldest fir
 
 ## WebSocket
 
-Connect to `ws://127.0.0.1:<port>/ws`. The server pushes JSON messages; each has a `"type"` discriminant field. Two delivery mechanisms are used:
+Connect to `ws://127.0.0.1:<port>/ws?token=<token>`. The server pushes JSON messages; each has a `"type"` discriminant field. Two delivery mechanisms are used:
 
 - **Polled (every 100 ms):** `progress_update`: always sent while the connection is open, regardless of activity.
 - **Event-driven:** all other event types, sent as soon as the underlying condition occurs.
@@ -200,18 +211,21 @@ Connect to `ws://127.0.0.1:<port>/ws`. The server pushes JSON messages; each has
 ### State machine
 
 ```
-idle
- ├─ POST /preview → previewing
- │    ├─ plan_ready → idle  (plan embedded in event; awaiting POST /run)
- │    └─ error_occurred → idle
- │
- ├─ POST /run → running
- │    ├─ POST /pause → paused → POST /pause → running
- │    ├─ POST /cancel → cancelled → idle
- │    └─ progress_update(status="done") → idle
- │
- └─ POST /shutdown → (server exits)
+idle / done / cancelled
+ |- POST /preview -> previewing
+ |    |- plan_ready, then status idle   (plan embedded in the event; awaiting POST /run)
+ |    |- preview_failed -> idle
+ |    '- POST /cancel -> idle           (no plan_ready, no preview_failed)
+ |
+ |- POST /run -> running
+ |    |- POST /pause -> paused -> POST /pause -> running
+ |    |- POST /cancel -> cancelled      (plan dropped)
+ |    '- all ops attempted -> done      (plan dropped)
+ |
+ '- POST /shutdown -> (server exits)
 ```
+
+`done` and `cancelled` are terminal: the status stays there until the next preview, which moves through `previewing` back to `idle`.
 
 Status transitions are reflected in the `status` field of every `progress_update` message, and additionally pushed as a dedicated `status_changed` event the moment they happen.
 
@@ -244,7 +258,7 @@ Pushed on every status transition, as it happens.
 ```json
 { "type": "status_changed", "status": "previewing" }
 ```
-The 100 ms `progress_update` tick only *samples* the status, so a state the engine enters and leaves inside one tick window would never be observed. The frontend needs the `previewing` → `idle` edge in particular: a cancelled preview emits neither `plan_ready` nor `error_occurred`, so this event is the only signal that it ended. Values are the same set `progress_update.status` uses.
+The 100 ms `progress_update` tick only *samples* the status, so a state the engine enters and leaves inside one tick window would never be observed. The frontend needs the `previewing` -> `idle` edge in particular: a cancelled preview emits neither `plan_ready` nor `preview_failed`, so this event is the only signal that it ended. Values are the same set `progress_update.status` uses.
 
 #### `drive_mode`
 Emitted immediately after drive detection at the start of a preview, before the walk begins.
@@ -289,9 +303,15 @@ Emitted when the preview plan is ready. Carries the full plan inline: no separat
 ```
 
 #### `error_occurred`
-Emitted when an individual file operation fails. The sync continues; errors accumulate in a skip log printed at the end.
+Emitted when an individual file operation fails. The sync continues; errors accumulate in a skip log printed at the end. `path` is relative to `dst_root` with forward slashes, the same form as `rel_path` in the plan and `ops_completed`, so the client marks that row as failed (failed rows stay visible after the run).
 ```json
-{ "type": "error_occurred", "path": "locked.db", "message": "Permission denied (os error 13)" }
+{ "type": "error_occurred", "path": "db/locked.db", "message": "Permission denied (os error 13)" }
+```
+
+#### `preview_failed`
+Emitted when a preview ends in an error other than a cancel (for example an unreadable SRC root).
+```json
+{ "type": "preview_failed", "message": "cannot read /src: Permission denied (os error 13)" }
 ```
 
 #### `ops_completed`
@@ -303,7 +323,7 @@ Flushed once per 100 ms tick (batched to avoid flooding the browser's JS event l
 #### `log_entry`
 Emitted whenever a subsystem writes a structured log line (plan summaries, skip-log errors, warnings, etc.). `run` matches the `run` field in `GET /api/v1/log` entries and increments with each preview start.
 ```json
-{ "type": "log_entry", "level": "info", "message": "Copied 3 files, moved 1, deleted 2.", "run": 1 }
+{ "type": "log_entry", "level": "info", "message": "3 copies. 1 move. 2 deletes. 3.4 MB to transfer.", "run": 1 }
 ```
 `level` values: `"info"`, `"warning"`, `"error"`. Entries are also appended to the ring buffer returned by `GET /api/v1/log`.
 

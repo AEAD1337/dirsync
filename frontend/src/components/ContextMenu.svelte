@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { trapFocus } from '../lib/focusTrap';
+
   const {
     x = 0,
     y = 0,
@@ -27,18 +29,22 @@
   const clampedY = $derived(Math.min(y, (typeof window !== 'undefined' ? window.innerHeight : 9999) - (showSkip ? 2 : 1) * ITEM_H - 24));
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && onclose()} />
-
 <div class="backdrop" role="presentation" onclick={onclose}></div>
 
-<menu class="ctx-menu" style="left:{clampedX}px; top:{clampedY}px">
+<!-- The first item takes focus; arrows move, Escape closes (trapFocus). -->
+<div
+  class="ctx-menu"
+  role="menu"
+  aria-label="Row actions"
+  tabindex="-1"
+  style="left:{clampedX}px; top:{clampedY}px"
+  use:trapFocus={{ onclose, arrows: true }}
+>
   {#if showSkip}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <li onclick={() => handle('skip')} onkeydown={() => {}}>Skip this directory</li>
+    <button type="button" role="menuitem" onclick={() => handle('skip')}>Skip this directory</button>
   {/if}
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <li onclick={() => handle('exclude')} onkeydown={() => {}}>Add exclusion pattern…</li>
-</menu>
+  <button type="button" role="menuitem" onclick={() => handle('exclude')}>Add exclusion pattern...</button>
+</div>
 
 <style>
   .backdrop {
@@ -54,18 +60,25 @@
     border-radius: 6px;
     padding: 4px 0;
     margin: 0;
-    list-style: none;
+    display: flex;
+    flex-direction: column;
     box-shadow: 0 4px 16px rgba(0,0,0,0.18);
     min-width: 180px;
   }
-  .ctx-menu li {
+  .ctx-menu button {
+    background: none;
+    border: none;
+    text-align: left;
+    font-family: inherit;
     padding: 7px 14px;
     cursor: pointer;
     font-size: 13px;
     color: var(--text);
     white-space: nowrap;
   }
-  .ctx-menu li:hover {
+  .ctx-menu button:hover,
+  .ctx-menu button:focus-visible {
     background: var(--hover);
+    outline: none;
   }
 </style>

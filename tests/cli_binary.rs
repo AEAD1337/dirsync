@@ -10,11 +10,17 @@ use std::path::Path;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+mod common;
+
 const EXE: &str = env!("CARGO_BIN_EXE_dirsync");
 
 fn run(args: &[&str]) -> Output {
+    // Never the developer's own config: its excludes would change results,
+    // and a broken one would get a `.bad` backup written next to it.
+    let isolated = TempDir::new().unwrap();
     Command::new(EXE)
         .args(args)
+        .env("DIRSYNC_CONFIG", isolated.path().join("config.toml"))
         .output()
         .expect("failed to run the dirsync binary")
 }
@@ -70,7 +76,7 @@ fn version_flag_prints_version_and_license() {
 #[test]
 fn completions_print_a_script_for_every_supported_shell() {
     for (shell, marker) in [
-        ("bash", "complete -F _dirsync dirsync"),
+        ("bash", "complete -o filenames -F _dirsync dirsync"),
         ("zsh", "#compdef dirsync"),
         ("fish", "complete -c dirsync"),
         ("powershell", "Register-ArgumentCompleter"),
@@ -107,7 +113,7 @@ fn completions_without_a_shell_argument_is_rejected() {
 fn missing_src_and_dst_is_a_usage_error() {
     let out = run(&["--dry-run"]);
 
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("SRC and DST required"));
 }
 
@@ -116,7 +122,7 @@ fn a_lone_src_is_a_usage_error() {
     let src = TempDir::new().unwrap();
     let out = run(&[src.path().to_str().unwrap()]);
 
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("SRC and DST required"));
 }
 
@@ -160,7 +166,7 @@ fn nested_endpoints_are_rejected() {
 
     let out = run(&[src.path().to_str().unwrap(), dst.to_str().unwrap()]);
 
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
     // A DST inside SRC would copy its own output one level deeper every run.
     assert!(
         stderr(&out).contains("is inside source"),
@@ -295,4 +301,83 @@ stderr: {}",
         stderr(&out)
     );
     assert!(stderr(&out).contains("skipped"), "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn an_unreadable_src_dir_is_reported_and_fails_the_exit_status() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    write_file(src.path(), "locked/a.txt", b"a");
+    write_file(dst.path(), "locked/a.txt", b"a");
+    write_file(dst.path(), "locked/b.txt", b"b");
+    let Some(_guard) = common::deny_listing(&src.path().join("locked")) else {
+        eprintln!("skipped: cannot deny listing here");
+        return;
+    };
+
+    let out = run(&[src.path().to_str().unwrap(), dst.path().to_str().unwrap()]);
+
+    // stderr is a pipe here, exactly like cron or a scheduled task: the
+    // warning must still be printed, and the status must not claim success.
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("locked"), "stderr: {}", stderr(&out));
+    assert!(dst.path().join("locked/b.txt").exists());
+}
+
+#[test]
+fn a_missing_config_file_is_a_usage_error() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let missing = src.path().join("jbo.toml");
+
+    let out = run(&[
+        "--dry-run",
+        "--config",
+        missing.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        dst.path().to_str().unwrap(),
+    ]);
+
+    assert_eq!(out.status.code(), Some(2), "stdout: {}", stdout(&out));
+    assert!(
+        stderr(&out).contains("jbo.toml"),
+        "stderr: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_missing_src_is_a_usage_error() {
+    let dst = TempDir::new().unwrap();
+    let missing = dst.path().join("no-such-src");
+
+    let out = run(&[missing.to_str().unwrap(), dst.path().to_str().unwrap()]);
+
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn the_port_flag_outside_gui_mode_is_reported_as_ignored() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+
+    let out = run(&[
+        "--dry-run",
+        "--port",
+        "9000",
+        src.path().to_str().unwrap(),
+        dst.path().to_str().unwrap(),
+    ]);
+
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("--port"), "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn a_cancel_during_any_preview_phase_maps_to_the_cancel_status() {
+    use dirsync::cli::{EXIT_CANCELLED, EXIT_FATAL, exit_code_for};
+
+    // Ctrl-C during the walk surfaces as this sentinel error from preview().
+    assert_eq!(exit_code_for(&anyhow::anyhow!("cancelled")), EXIT_CANCELLED);
+    assert_eq!(exit_code_for(&anyhow::anyhow!("disk on fire")), EXIT_FATAL);
 }

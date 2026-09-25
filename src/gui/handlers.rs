@@ -35,8 +35,12 @@ pub async fn put_config(
     {
         return Err((StatusCode::BAD_REQUEST, e));
     }
-    let merged = {
-        let mut cfg = state.config.write().unwrap();
+    // Saved while the write lock is held, like post_preview's save: saving
+    // a clone after releasing it let an interleaved preview's newer
+    // last_src/last_dst be overwritten on disk by this older snapshot.
+    let state2 = state.clone();
+    let merged = tokio::task::spawn_blocking(move || {
+        let mut cfg = state2.config.write().unwrap();
         if let Some(port) = patch.port {
             cfg.port = port;
         }
@@ -46,11 +50,11 @@ pub async fn put_config(
         if let Some(theme) = patch.theme {
             cfg.theme = theme;
         }
-        cfg.clone()
-    };
-    merged
-        .save()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        cfg.save().map(|()| cfg.clone())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(merged))
 }
 
@@ -63,7 +67,7 @@ pub struct PreviewRequest {
     pub excludes: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct PlanSummary {
     pub copy_count: usize,
     pub move_count: usize,
@@ -177,8 +181,15 @@ pub async fn post_preview(
     // (e.g. `C:\Users\..\Windows\`) are resolved before `is_system_critical`
     // does its prefix matching, then rejects nested SRC/DST pairs. Shared with
     // CLI mode: see `crate::paths`.
-    crate::paths::validate_endpoints(&src, &dst, state.yolo)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // canonicalize/metadata block for the full OS timeout on a dead share:
+    // keep them off the async workers that drive the progress stream.
+    {
+        let (src, dst, yolo) = (src.clone(), dst.clone(), state.yolo);
+        tokio::task::spawn_blocking(move || crate::paths::validate_endpoints(&src, &dst, yolo))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
 
     // Claim Previewing under the same write-lock discipline as post_run's run
     // claim. Without it a preview started mid-run reset the executor's shared
@@ -210,12 +221,17 @@ pub async fn post_preview(
     let mut config = state.config.read().unwrap().clone();
     config = config.with_extra_excludes(body.excludes);
 
-    // Save last used paths
+    // Save last used paths (blocking file I/O, under the config lock so a
+    // concurrent PUT /config cannot roll it back on disk).
     {
-        let mut cfg = state.config.write().unwrap();
-        cfg.last_src = Some(src.clone());
-        cfg.last_dst = Some(dst.clone());
-        let _ = cfg.save();
+        let (state, src, dst) = (state.clone(), src.clone(), dst.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut cfg = state.config.write().unwrap();
+            cfg.last_src = Some(src);
+            cfg.last_dst = Some(dst);
+            let _ = cfg.save();
+        })
+        .await;
     }
 
     // Safe now: the claim above guarantees no executor holds these channels.
@@ -228,44 +244,43 @@ pub async fn post_preview(
         // Drive detection happens inside preview(); it emits the DriveMode
         // event and log line through the shared progress channel.
         let engine = SyncEngine::new(src, dst, Arc::new(config));
-        match engine
-            .preview(Some(progress.clone()), Some(cancel_rx))
-            .await
-        {
-            Ok(plan) => {
-                // Store the plan BEFORE emitting PlanReady so the WS handler
-                // can read it without a race when it reacts to the event.
+        let deliver_state = state.clone();
+        let deliver_progress = progress.clone();
+        // The plan is stored and announced *before* the preview releases its
+        // Previewing claim: an Idle arriving first showed an empty plan and
+        // re-enabled Preview while plan_ready was still in flight.
+        let result = engine
+            .preview_with(Some(progress.clone()), Some(cancel_rx), move |plan| {
                 let log_msg = plan_log_message(&plan);
-                *state.last_plan.write().unwrap() = Some(plan);
-                progress.emit(crate::progress::ProgressEvent::PlanReady);
-                progress.emit_log(LogLevel::Info, log_msg);
+                *deliver_state.last_plan.write().unwrap() = Some(plan);
+                deliver_progress.emit(crate::progress::ProgressEvent::PlanReady);
+                deliver_progress.emit_log(LogLevel::Info, log_msg);
+            })
+            .await;
+        if let Err(e) = result {
+            if e.to_string() == "cancelled" {
+                // preview() already released the Previewing claim; without
+                // a log line a cancelled preview leaves no trace at all.
+                progress.emit_log(LogLevel::Info, "Preview cancelled.".to_owned());
+                return;
             }
-            Err(e) => {
-                if e.to_string() == "cancelled" {
-                    // preview() already released the Previewing claim; without
-                    // a log line a cancelled preview leaves no trace at all.
-                    progress.emit_log(LogLevel::Info, "Preview cancelled.".to_owned());
+            progress.emit(crate::progress::ProgressEvent::PreviewFailed {
+                message: e.to_string(),
+            });
+            // Release the preview claim so the frontend clears the scanning
+            // indicator: compare-and-set, never a blind write that could
+            // clobber another actor's status.
+            {
+                let mut status = progress.status.write().unwrap();
+                if *status == crate::progress::SyncStatus::Previewing {
+                    *status = crate::progress::SyncStatus::Idle;
                 } else {
-                    progress.emit(crate::progress::ProgressEvent::FileError {
-                        name: "preview".into(),
-                        message: e.to_string(),
-                    });
-                    // Release the preview claim so the frontend clears the
-                    // scanning indicator: compare-and-set, never a blind
-                    // write that could clobber another actor's status.
-                    {
-                        let mut status = progress.status.write().unwrap();
-                        if *status == crate::progress::SyncStatus::Previewing {
-                            *status = crate::progress::SyncStatus::Idle;
-                        } else {
-                            return;
-                        }
-                    }
-                    progress.emit(crate::progress::ProgressEvent::StatusChanged {
-                        status: crate::progress::SyncStatus::Idle,
-                    });
+                    return;
                 }
             }
+            progress.emit(crate::progress::ProgressEvent::StatusChanged {
+                status: crate::progress::SyncStatus::Idle,
+            });
         }
     });
 
@@ -346,7 +361,6 @@ pub fn plan_to_summary(plan: &SyncPlan) -> PlanSummary {
                 hash: None,
                 from_path: None,
             }),
-            #[cfg(windows)]
             SyncOp::CaseRename { from, to, .. } => Some(OpEntry {
                 kind: "case-rename".into(),
                 rel_path: rel(to),
@@ -501,25 +515,28 @@ pub async fn post_run(
             progress.emit_log(LogLevel::Info, "Dry-run: no changes made.".to_owned());
         }
         if !skip_log.is_empty() {
-            progress.emit_log(
-                LogLevel::Error,
-                format!(
-                    "{} file(s) had errors and were skipped:",
-                    crate::fmt::fmt_count(skip_log.iter().count())
-                ),
-            );
+            // Details first, summary last: a burst that overruns a lagging
+            // receiver drops the *oldest* events, and the summary is the one
+            // line that must survive.
             for e in skip_log.iter() {
                 progress.emit_log(
                     LogLevel::Error,
                     format!("  {}: {}", e.path.display(), e.message),
                 );
             }
+            progress.emit_log(
+                LogLevel::Error,
+                format!(
+                    "{} file(s) had errors and were skipped (listed above).",
+                    crate::fmt::fmt_count(skip_log.iter().count())
+                ),
+            );
         }
-        // A plan that ran to completion is consumed: a second Run would redo
-        // every copy and fail every Delete/Move against the mirrored tree.
-        // A cancelled or dry run keeps it, so the user can resume or run for
-        // real without another preview.
-        if !dry_run && *progress.status.read().unwrap() == crate::progress::SyncStatus::Done {
+        // A real run consumes its plan, finished or cancelled: nothing records
+        // which ops already ran, so a second Run would replay them all, with
+        // every completed Move and Delete failing as NotFound. A dry run
+        // changed nothing and keeps it, so the user can run for real.
+        if !dry_run {
             *task_state.last_plan.write().unwrap() = None;
         }
     });
@@ -563,7 +580,7 @@ pub struct BrowseRequest {
 #[derive(Serialize)]
 pub struct BrowseEntry {
     pub name: String,
-    pub path: PathBuf,
+    pub path: String,
     pub is_dir: bool,
 }
 
@@ -627,13 +644,20 @@ fn browse_blocking(body: BrowseRequest) -> Result<BrowseResponse, (StatusCode, S
         if body.dir_only && !meta.is_dir() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
+        // A name that is not valid Unicode cannot travel through JSON and
+        // back as a path the server could open again: skip it rather than
+        // failing the whole listing.
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let (Some(name), Some(path_str)) = (file_name.to_str(), path.to_str()) else {
+            continue;
+        };
         if name.starts_with('.') && !meta.is_dir() {
             continue; // skip hidden files but show hidden directories for navigation
         }
         entries.push(BrowseEntry {
-            name,
-            path: entry.path(),
+            name: name.to_owned(),
+            path: path_str.to_owned(),
             is_dir: meta.is_dir(),
         });
     }
@@ -858,6 +882,7 @@ mod tests {
             ops.push(SyncOp::Symlink {
                 target: p(i),
                 dst: p(i),
+                kind: crate::sync::planner::LinkKind::File,
             });
         }
         crate::sync::planner::SyncPlan {
@@ -874,6 +899,7 @@ mod tests {
             dst_root: std::path::PathBuf::from("/dst"),
             hdd: false,
             dir_blocked_targets: vec![],
+            walk_errors: vec![],
         }
     }
 

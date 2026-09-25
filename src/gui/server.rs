@@ -11,32 +11,61 @@ use axum::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// Reject requests that fail the same-origin check.
+/// A fresh per-launch session token: 128 random bits, lowercase hex.
+pub fn new_token() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("OS random number generator unavailable");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Constant-time comparison, so response timing cannot leak the token.
+fn token_matches(given: &[u8], expected: &[u8]) -> bool {
+    given.len() == expected.len()
+        && given
+            .iter()
+            .zip(expected)
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+/// The token a request carries: the `X-Dirsync-Token` header (fetch), or a
+/// `token` query parameter (the WebSocket, whose browser API cannot set
+/// headers).
+fn request_token(request: &Request) -> Option<&str> {
+    if let Some(h) = request.headers().get("x-dirsync-token") {
+        return h.to_str().ok();
+    }
+    request
+        .uri()
+        .query()?
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("token="))
+}
+
+/// Gate every API and WebSocket request.
 ///
-/// Two independent defences:
-/// 1. `Host` header must be one of the known localhost addresses at `port`.
-///    This closes DNS-rebinding: an attacker whose page is served from
-///    `evil.com` sends `Host: evil.com`, which is not in the allowlist.
-/// 2. When `Origin` is present it must match a known localhost origin.
-///    When `Origin` is absent on a state-changing method (`POST`/`PUT`),
-///    the request is rejected: closing the local-process scripting vector.
-async fn require_same_origin(
+/// Three independent checks:
+/// 1. `Host` must be one of the localhost addresses at `port`: closes DNS
+///    rebinding, where an attacker's page sends `Host: evil.com`.
+/// 2. When `Origin` is present it must be ours: closes browser CSRF.
+/// 3. The per-launch session token must match. Headers are trivial to forge
+///    for any local *process*, and loopback is shared by every user of the
+///    machine (all Linux users, all Windows RDP / fast-user-switching
+///    sessions): without the token another user could drive this server,
+///    which runs as you, into deleting your files. Only the browser tab
+///    opened with the token in its URL fragment knows it.
+async fn require_session(
     port: u16,
+    token: Arc<str>,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let valid_hosts = [
-        format!("127.0.0.1:{port}"),
-        format!("localhost:{port}"),
-        format!("[::1]:{port}"),
-    ];
+    let valid_hosts = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
     let valid_origins = [
         format!("http://127.0.0.1:{port}"),
         format!("http://localhost:{port}"),
-        format!("http://[::1]:{port}"),
     ];
 
-    // Always validate Host: this is the primary DNS-rebinding defence.
     let host = request
         .headers()
         .get("host")
@@ -46,40 +75,28 @@ async fn require_same_origin(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    match request.headers().get("origin") {
-        Some(origin) => {
-            if !valid_origins
-                .iter()
-                .any(|v| v == origin.to_str().unwrap_or(""))
-            {
-                return Err(StatusCode::FORBIDDEN);
-            }
-        }
-        None => {
-            // Browsers always send Origin on cross-origin state-changing
-            // requests. A missing Origin on POST/PUT means a non-browser
-            // local process; reject it to limit the local attack surface.
-            let method = request.method();
-            if method == axum::http::Method::POST || method == axum::http::Method::PUT {
-                return Err(StatusCode::FORBIDDEN);
-            }
-        }
+    if let Some(origin) = request.headers().get("origin")
+        && !valid_origins
+            .iter()
+            .any(|v| v == origin.to_str().unwrap_or(""))
+    {
+        return Err(StatusCode::FORBIDDEN);
     }
 
-    Ok(next.run(request).await)
+    match request_token(&request) {
+        Some(given) if token_matches(given.as_bytes(), token.as_bytes()) => {
+            Ok(next.run(request).await)
+        }
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
 }
 
-pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
-    // Bind first and derive everything user-visible - printed URL, browser
-    // open, Host/Origin allowlist - from the *actual* bound address, so a
-    // port the OS reassigns can never produce an unreachable UI.
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
-    let addr = listener.local_addr()?;
-    let port = addr.port();
-
-    // API and WebSocket routes are protected by the same-origin middleware.
-    // Static assets use a separate router without it (no state mutations possible).
-    let api = Router::new()
+/// The complete HTTP surface: API and WebSocket behind `require_session`,
+/// static assets without it (the page must load before it can read the
+/// token from its own URL; the assets contain no secrets and change nothing).
+pub fn router(state: Arc<AppState>, port: u16, token: String) -> Router {
+    let token: Arc<str> = token.into();
+    Router::new()
         .route(
             "/api/v1/config",
             get(handlers::get_config).put(handlers::put_config),
@@ -97,13 +114,41 @@ pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
         .route("/api/v1/system", get(handlers::get_system))
         .route("/ws", get(ws_handler))
         .layer(middleware::from_fn(move |req, next| {
-            require_same_origin(port, req, next)
+            require_session(port, token.clone(), req, next)
         }))
-        .with_state(state.clone());
+        .with_state(state)
+        .fallback(static_handler)
+}
 
-    let app = api.fallback(static_handler);
+/// Buffer a log entry for `GET /log` (the single server-side writer).
+fn record_log(state: &AppState, entry: crate::progress::LogEntry) {
+    let mut buf = state.log_buffer.lock().unwrap();
+    crate::gui::ws::push_log_entry(&mut buf, entry);
+}
 
-    let url = format!("http://{addr}");
+/// Record that the log consumer fell `missed` events behind the broadcast
+/// channel, so the buffered log shows the gap instead of hiding it.
+pub fn record_lag(state: &AppState, missed: u64) {
+    let entry = crate::gui::ws::lag_notice(missed, state.progress.current_run());
+    eprintln!("[WARN ] {}", entry.message);
+    record_log(state, entry);
+}
+
+pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
+    // Bind first and derive everything user-visible - printed URL, browser
+    // open, Host/Origin allowlist - from the *actual* bound address, so a
+    // port the OS reassigns can never produce an unreachable UI.
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
+    let addr = listener.local_addr()?;
+    let port = addr.port();
+
+    let token = new_token();
+    let app = router(state.clone(), port, token.clone());
+
+    // The token travels in the fragment: browsers never send it to the
+    // server in a request line or a Referer, and the page moves it into
+    // sessionStorage and strips it from the address bar.
+    let url = format!("http://{addr}/#t={token}");
     println!("dirsync GUI running at {url}");
 
     // Open browser in background
@@ -137,10 +182,7 @@ pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
                 ev = console_rx.recv() => {
                     match ev {
                         Ok(ProgressEvent::LogEntry(entry)) => {
-                            {
-                                let mut buf = log_state.log_buffer.lock().unwrap();
-                                crate::gui::ws::push_log_entry(&mut buf, entry.clone());
-                            }
+                            record_log(&log_state, entry.clone());
                             let prefix = match entry.level {
                                 crate::progress::LogLevel::Info    => "INFO ",
                                 crate::progress::LogLevel::Warning => "WARN ",
@@ -152,7 +194,9 @@ pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
                                 println!("[{prefix}] {}", entry.message);
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                            record_lag(&log_state, missed);
+                        }
                         Err(_) | Ok(ProgressEvent::Shutdown) => break,
                         _ => {}
                     }

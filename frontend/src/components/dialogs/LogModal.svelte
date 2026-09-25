@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { LogEntry } from '../../lib/types';
   import { tick } from 'svelte';
+  import { trapFocus } from '../../lib/focusTrap';
 
   const {
     entries,
@@ -12,11 +13,13 @@
     onclear: () => void;
   } = $props();
 
-  let listEl: HTMLDivElement = $state(undefined as any);
+  let listEl: HTMLDivElement | undefined = $state();
 
-  // Auto-scroll to bottom when entries grow.
+  // Auto-scroll to bottom when entries change. Tracks the array itself, not
+  // its length: once the log is at its cap the length stops growing while
+  // every batch still replaces the array.
   $effect(() => {
-    const _ = entries.length;
+    void entries;
     tick().then(() => {
       if (listEl) listEl.scrollTop = listEl.scrollHeight;
     });
@@ -45,15 +48,20 @@
   const rows = $derived(buildRows(entries));
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
-
 <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="dialog">
+  <div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="log-title"
+    tabindex="-1"
+    use:trapFocus={{ onclose }}
+  >
     <div class="header">
-      <span class="title">Log</span>
+      <span class="title" id="log-title">Log</span>
       <div class="header-actions">
-        <button class="btn-clear" onclick={onclear} title="Clear log">Clear</button>
-        <button class="btn-close" onclick={onclose} title="Close">✕</button>
+        <button type="button" class="btn-clear" onclick={onclear} title="Clear log">Clear</button>
+        <button type="button" class="btn-close" onclick={onclose} title="Close" aria-label="Close" data-autofocus>✕</button>
       </div>
     </div>
     <div class="list" bind:this={listEl}>
@@ -84,6 +92,7 @@
   }
 
   .dialog {
+    outline: none;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;

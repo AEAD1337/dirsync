@@ -1,5 +1,6 @@
-import { writable, derived } from 'svelte/store';
-import type { AppConfig, OpEntry, ProgressSnapshot, ScanProgressPhase, SyncStatus } from './types';
+import { writable } from 'svelte/store';
+import type { AppConfig, ProgressSnapshot } from './types';
+import type { PlanOp } from './treeUtils';
 
 export const config = writable<AppConfig>({
   port: 7373,
@@ -28,13 +29,17 @@ export const progress = writable<ProgressSnapshot>({
   status: 'idle',
 });
 
-export const status = derived(progress, ($p) => $p.status as SyncStatus);
+// Ops list: all planned ops, sorted by their path key. Completed ops drop out
+// of the display; failed ones stay, with their message in `opErrors`.
+export const ops = writable<PlanOp[]>([]);
 
-// Ops list: all planned ops, removed on completion, kept on error
-export const ops = writable<(OpEntry & { error?: string })[]>([]);
+// Per-op failures of the current run, keyed by DST-relative rel_path (the
+// shape error_occurred carries). A lookup table rather than a field on each
+// op, so an error flood does not rebuild the op list once per message.
+export const opErrors = writable(new Map<string, string>());
 
-// Errors that occurred during sync
-export const errors = writable<{ path: string; message: string }[]>([]);
+// Set once the server has answered 401: this page holds no valid token.
+export const unauthorized = writable(false);
 
 export const isDark = writable(false);
 
@@ -51,10 +56,16 @@ export const activeDirs = writable(new Set<string>());
 export const collapsedDirs = writable(new Set<string>());
 
 // Plan-level metadata set when plan_ready arrives, cleared on next preview.
-export const planMeta = writable<{
+// `approx` marks totals reduced client-side by a Skip whose effect on the
+// plan's row-less ops (MkDir/RmDir) cannot be known here; the server recounts
+// the real plan at run time.
+export interface PlanMeta {
   totalOps: number;
   totalBytes: number;
-}>({ totalOps: 0, totalBytes: 0 });
+  approx?: boolean;
+}
+export const EMPTY_PLAN_META: PlanMeta = { totalOps: 0, totalBytes: 0 };
+export const planMeta = writable<PlanMeta>(EMPTY_PLAN_META);
 
 // Scan progress state during Preview
 export const scanState = writable<{

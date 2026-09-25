@@ -303,13 +303,14 @@ dependencies = [
 
 [[package]]
 name = "dirsync"
-version = "1.1.6"
+version = "1.1.7"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
  "dirs",
  "filetime",
+ "getrandom 0.3.4",
  "indicatif",
  "lexopt",
  "mime_guess",
@@ -323,6 +324,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
+ "tower",
  "walkdir",
  "wildmatch",
  "windows",

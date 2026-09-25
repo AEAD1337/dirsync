@@ -33,10 +33,14 @@ pub struct MatchedEntry {
     /// None for files matched by mtime alone or for brand-new files with no
     /// same-size candidates in DST (no hash was needed).
     pub src_hash: Option<[u8; 32]>,
-    /// On Windows: the original DST rel-path when this entry was matched
-    /// case-insensitively (NTFS path == SRC path, stored name differs in case).
-    /// The planner emits a CaseRename op alongside the content op.
+    /// On a case-insensitive DST: the original DST rel-path when this entry
+    /// was matched ignoring case (same on-disk file, stored name differs in
+    /// case). The planner emits a CaseRename op alongside the content op.
     pub case_renamed_from: Option<PathBuf>,
+    /// For a `MovedFrom` match: the moved DST file's mtime is outside the
+    /// tolerance, so the planner fixes it in the same run instead of leaving
+    /// a TouchMtime for the next one.
+    pub touch_after_move: bool,
 }
 
 pub struct OrphanEntry {
@@ -56,6 +60,81 @@ pub struct MatchOutput {
     pub orphans: Vec<OrphanEntry>,
     /// Directories detected as renamed (same files inside, different path).
     pub renamed_dirs: Vec<RenamedDir>,
+    /// DST resolves names ignoring case (see `dst_is_case_insensitive`).
+    /// The planner then compares paths ignoring case too: otherwise a Copy
+    /// of `photo.jpg` and the orphan Delete of `Photo.jpg` hit the same file.
+    pub case_insensitive: bool,
+}
+
+/// The deepest renamed directory at or above `rel` in `index` (keyed by one
+/// side's rel-path), with the rest of `rel` below it. Deepest wins: renames
+/// can nest (`a -> y/z` alongside `a/b -> x`), and the inner one is the one
+/// that applies to a path below it.
+pub(super) fn deepest_rename<'a, 'p>(
+    rel: &'p Path,
+    index: &HashMap<PathBuf, &'a RenamedDir>,
+) -> Option<(&'a RenamedDir, &'p Path)> {
+    rel.ancestors()
+        .take_while(|a| !a.as_os_str().is_empty())
+        .find_map(|a| {
+            index
+                .get(a)
+                .map(|&r| (r, rel.strip_prefix(a).unwrap_or(rel)))
+        })
+}
+
+/// Two metadata records describe the same file. Unix compares identities;
+/// std has no stable file id on Windows, so size and timestamps stand in.
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        a.dev() == b.dev() && a.ino() == b.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        a.len() == b.len()
+            && a.modified().ok() == b.modified().ok()
+            && a.created().ok() == b.created().ok()
+            && a.file_type() == b.file_type()
+    }
+}
+
+/// Whether the DST filesystem resolves names ignoring case: NTFS, APFS and
+/// HFS+ by default, exFAT/FAT, most SMB shares. Decided by the filesystem,
+/// not the OS: macOS and Linux write to such volumes all the time. Probed
+/// read-only on an existing DST entry: its name with the ASCII letter case
+/// flipped must resolve to the same file. With nothing to probe there is
+/// nothing to delete either; fall back to the platform's usual default.
+pub fn dst_is_case_insensitive(dst_entries: &[FileEntry]) -> bool {
+    for e in dst_entries {
+        let Some(name) = e.abs_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let flipped: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        if flipped == name {
+            continue; // no ASCII letters to flip
+        }
+        let other = e.abs_path.with_file_name(flipped);
+        match (
+            std::fs::symlink_metadata(&e.abs_path),
+            std::fs::symlink_metadata(&other),
+        ) {
+            (Ok(a), Ok(b)) => return same_file(&a, &b),
+            (Ok(_), Err(_)) => return false,
+            _ => continue,
+        }
+    }
+    cfg!(any(windows, target_os = "macos"))
 }
 
 pub fn match_trees(
@@ -117,11 +196,8 @@ pub fn match_trees(
     // ------------------------------------------------------------------ //
     // Build an "effective DST path" function: files inside a renamed dir  //
     // are looked up as if they already live at the new (SRC) path.        //
-    //                                                                      //
-    // Index renamed_dirs by dst_rel for O(path_depth) lookups instead of  //
-    // the O(renamed_dirs) linear scan the naive closure would produce.     //
-    // detect_renamed_dirs guarantees no nesting, so each DST path has at  //
-    // most one matching prefix in this map.                                //
+    // Indexed by rel-path for O(path_depth) lookups instead of a scan     //
+    // over every renamed dir.                                             //
     // ------------------------------------------------------------------ //
 
     let rename_index: HashMap<PathBuf, &RenamedDir> = renamed_dirs
@@ -135,20 +211,10 @@ pub fn match_trees(
         .map(|r| (r.src_rel.clone(), r))
         .collect();
 
-    // Walk ancestors of `rel` from deepest to shallowest until we find a
-    // renamed-dir entry (or exhaust the path, in which case return as-is).
     let effective_dst_path = |rel: &PathBuf| -> PathBuf {
-        let mut cur = rel.as_path();
-        loop {
-            if let Some(rename) = rename_index.get(cur) {
-                // cur == rename.dst_rel; suffix is the remaining path below it.
-                let suffix = rel.strip_prefix(cur).unwrap();
-                return rename.src_rel.join(suffix);
-            }
-            match cur.parent() {
-                Some(p) if !p.as_os_str().is_empty() => cur = p,
-                _ => return rel.clone(),
-            }
+        match deepest_rename(rel, &rename_index) {
+            Some((rename, suffix)) => rename.src_rel.join(suffix),
+            None => rel.clone(),
         }
     };
 
@@ -169,27 +235,61 @@ pub fn match_trees(
         .map(|(e, eff)| (eff.clone(), *e))
         .collect();
 
-    // Windows: secondary index keyed by lowercased effective path for case-insensitive
-    // matching. On NTFS (case-insensitive), `a.jpg` and `A.jpg` are the same path:
-    // the primary HashMap misses them; this catches the remainder.
-    #[cfg(windows)]
-    let dst_by_path_lower: HashMap<String, &FileEntry> = dst_files
-        .iter()
-        .map(|e| {
-            let eff = effective_dst_path(&e.rel_path);
-            (eff.to_string_lossy().to_lowercase(), *e)
-        })
-        .collect();
+    // Case-insensitive DST: secondary index keyed by lowercased effective
+    // path. There `a.jpg` and `A.jpg` are the same file: the primary HashMap
+    // misses them; this catches the remainder. Empty on a case-sensitive DST.
+    let case_insensitive = dst_is_case_insensitive(dst_entries);
+    let lower = |p: &Path| p.to_string_lossy().to_lowercase();
+    let dst_by_path_lower: HashMap<String, &FileEntry> = if case_insensitive {
+        dst_files
+            .iter()
+            .zip(dst_effective.iter())
+            .map(|(e, eff)| (lower(eff), *e))
+            .collect()
+    } else {
+        HashMap::new()
+    };
 
     // Move-candidate index. DST files with a same-path SRC counterpart are
     // excluded: the Phase-3 pre-pass reserves them before move detection, so
     // they can never be claimed as move sources: hashing them as candidates
     // would be pure waste. The same-path branch below queues its own hashes
     // when content actually needs comparing.
+    //
+    // Also excluded: DST files the executor must clear *before* the move
+    // phase because SRC changes type around them. One sitting where SRC has
+    // a directory is removed by that directory's MkDir (Phase 1); one below
+    // a path where SRC has a file or symlink is removed with its directory
+    // by the hoisted cleanup (Phase 1.5). Claimed as a move source, the
+    // first was destroyed before its Move ran (which then renamed the fresh
+    // empty directory instead), and the second blocked its own target for
+    // ever. As plain orphans they get the Delete + Copy that converges.
     let src_file_paths: HashSet<&PathBuf> = src_files.iter().map(|e| &e.rel_path).collect();
+    let src_non_dir_paths: HashSet<&PathBuf> = src_entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .map(|e| &e.rel_path)
+        .collect();
+    let cleared_before_moves = |eff: &Path| {
+        src_dir_paths.contains(&eff.to_path_buf())
+            || eff
+                .ancestors()
+                .skip(1)
+                .any(|a| src_non_dir_paths.contains(&a.to_path_buf()))
+    };
+    // A case variant of a SRC path is reserved by the pre-pass just like an
+    // exact match, so it is no move candidate either.
+    let src_file_paths_lower: HashSet<String> = if case_insensitive {
+        src_files.iter().map(|e| lower(&e.rel_path)).collect()
+    } else {
+        HashSet::new()
+    };
     let mut dst_by_size: HashMap<u64, Vec<&FileEntry>> = HashMap::new();
     for (e, eff) in dst_files.iter().zip(dst_effective.iter()) {
-        if !src_file_paths.contains(eff) {
+        if !src_file_paths.contains(eff)
+            && !cleared_before_moves(eff)
+            && !(case_insensitive && src_file_paths_lower.contains(&lower(eff)))
+        {
             dst_by_size.entry(e.size).or_default().push(*e);
         }
     }
@@ -198,17 +298,14 @@ pub fn match_trees(
 
     for src in &src_files {
         if let Some(dst) = dst_by_path.get(&src.rel_path) {
-            queue_same_path_hashes(src, dst, &mut needs_hash);
+            queue_same_path_hashes(src, dst, dst.rel_path != src.rel_path, &mut needs_hash);
         } else {
-            // Windows: case-insensitive fallback: same NTFS path, different stored case.
-            // Hash both so Phase 3 can compare content; skip move-detection hashing.
-            #[cfg(windows)]
-            {
-                let lower = src.rel_path.to_string_lossy().to_lowercase();
-                if let Some(dst) = dst_by_path_lower.get(&lower) {
-                    queue_same_path_hashes(src, dst, &mut needs_hash);
-                    continue;
-                }
+            // Case-insensitive fallback: same on-disk file, different stored
+            // case. Hash both so Phase 3 can compare content; skip
+            // move-detection hashing.
+            if case_insensitive && let Some(dst) = dst_by_path_lower.get(&lower(&src.rel_path)) {
+                queue_same_path_hashes(src, dst, false, &mut needs_hash);
+                continue;
             }
             // No same-path DST file: hash SRC and same-size DST candidates only
             // when candidates exist. Zero-byte files are excluded: their hashes
@@ -360,47 +457,45 @@ pub fn match_trees(
         if dst_by_path.contains_key(&src.rel_path) {
             dst_matched.insert(src.rel_path.clone());
         }
-        // Windows: also reserve case-insensitive matches so they are never
-        // claimed as move sources by a different SRC file processed earlier.
-        #[cfg(windows)]
-        if !dst_by_path.contains_key(&src.rel_path) {
-            let lower = src.rel_path.to_string_lossy().to_lowercase();
-            if let Some(dst) = dst_by_path_lower.get(&lower) {
-                dst_matched.insert(effective_dst_path(&dst.rel_path));
-            }
+        // Also reserve case-insensitive matches so they are never claimed as
+        // move sources by a different SRC file processed earlier.
+        if case_insensitive
+            && !dst_by_path.contains_key(&src.rel_path)
+            && let Some(dst) = dst_by_path_lower.get(&lower(&src.rel_path))
+        {
+            dst_matched.insert(effective_dst_path(&dst.rel_path));
         }
     }
 
     for src in &src_files {
         if let Some(dst) = dst_by_path.get(&src.rel_path) {
             // Always resolved in place; mark DST as matched so it is never
-            // treated as an orphan or claimed as a move source.
-            dst_matched.insert(effective_dst_path(&dst.rel_path));
+            // treated as an orphan or claimed as a move source. Its effective
+            // path is the SRC path: that is how dst_by_path found it.
+            dst_matched.insert(src.rel_path.clone());
             matched.push(MatchedEntry {
                 src: (*src).clone(),
-                result: classify_same_path(src, dst, &hashes),
+                result: classify_same_path(src, dst, dst.rel_path != src.rel_path, &hashes),
                 src_hash: hashes.get(&src.abs_path).copied(),
                 case_renamed_from: None,
+                touch_after_move: false,
             });
             continue;
         }
 
-        // Windows: case-insensitive path match: same NTFS path, different stored
-        // case. Classify by content like a same-path match; record old DST name so
-        // the planner can emit a CaseRename alongside any content op.
-        #[cfg(windows)]
-        {
-            let lower = src.rel_path.to_string_lossy().to_lowercase();
-            if let Some(dst) = dst_by_path_lower.get(&lower) {
-                dst_matched.insert(effective_dst_path(&dst.rel_path));
-                matched.push(MatchedEntry {
-                    src: (*src).clone(),
-                    result: classify_same_path(src, dst, &hashes),
-                    src_hash: hashes.get(&src.abs_path).copied(),
-                    case_renamed_from: Some(dst.rel_path.clone()),
-                });
-                continue;
-            }
+        // Case-insensitive path match: same on-disk file, different stored
+        // case. Classify by content like a same-path match; record old DST
+        // name so the planner can emit a CaseRename alongside any content op.
+        if case_insensitive && let Some(dst) = dst_by_path_lower.get(&lower(&src.rel_path)) {
+            dst_matched.insert(effective_dst_path(&dst.rel_path));
+            matched.push(MatchedEntry {
+                src: (*src).clone(),
+                result: classify_same_path(src, dst, false, &hashes),
+                src_hash: hashes.get(&src.abs_path).copied(),
+                case_renamed_from: Some(dst.rel_path.clone()),
+                touch_after_move: false,
+            });
+            continue;
         }
 
         // No same-path DST counterpart exists: try to find the file at a
@@ -411,23 +506,9 @@ pub fn match_trees(
         // treating one empty DST file as a "moved" copy of another.
         let is_empty = src.size == 0;
         // Skip move detection for files inside a renamed dir: the dir-level
-        // Move op handles them; the file will be matched by path above.
-        // Uses src_rename_index for O(path_depth) instead of O(renamed_dirs).
-        let inside_renamed = {
-            let mut cur = src.rel_path.as_path();
-            let mut found = false;
-            loop {
-                if src_rename_index.contains_key(cur) {
-                    found = true;
-                    break;
-                }
-                match cur.parent() {
-                    Some(p) if !p.as_os_str().is_empty() => cur = p,
-                    _ => break,
-                }
-            }
-            found
-        };
+        // Move op carries them. Defensive: equal fingerprints mean every such
+        // file already matched by path above, so this should never fire.
+        let inside_renamed = deepest_rename(&src.rel_path, &src_rename_index).is_some();
 
         if !is_empty && !inside_renamed {
             // Look up by hash directly: O(1) instead of scanning all
@@ -445,6 +526,7 @@ pub fn match_trees(
                             result: MatchResult::MovedFrom(candidate.rel_path.clone()),
                             src_hash: Some(src_hash),
                             case_renamed_from: None,
+                            touch_after_move: !mtimes_close(src.mtime, candidate.mtime),
                         });
                         found_move = true;
                         break;
@@ -460,6 +542,7 @@ pub fn match_trees(
                 result: MatchResult::NewInSrc,
                 src_hash: hashes.get(&src.abs_path).copied(),
                 case_renamed_from: None,
+                touch_after_move: false,
             });
         }
     }
@@ -499,6 +582,7 @@ pub fn match_trees(
                 result,
                 src_hash: None,
                 case_renamed_from: None,
+                touch_after_move: false,
             });
         } else {
             // No DST symlink at this path. If a regular file occupies it, the
@@ -514,6 +598,7 @@ pub fn match_trees(
                 result,
                 src_hash: None,
                 case_renamed_from: None,
+                touch_after_move: false,
             });
         }
     }
@@ -527,6 +612,7 @@ pub fn match_trees(
     }
 
     Ok(MatchOutput {
+        case_insensitive,
         matched,
         orphans,
         renamed_dirs,
@@ -573,15 +659,28 @@ fn detect_renamed_dirs(
     let mut sorted_dst_files = dst_files.to_vec();
     sorted_dst_files.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
-    // Index DST dirs by fingerprint for O(1) lookup per SRC dir.
-    // fingerprint → list of DST dirs that have that fingerprint.
-    let mut dst_by_fp: HashMap<Vec<(PathBuf, u64)>, Vec<&FileEntry>> = HashMap::new();
+    // Index DST dirs by a 64-bit digest of their fingerprint. Keying on the
+    // fingerprint itself stored every file path once per enclosing extra
+    // directory (files x depth PathBufs: gigabytes for a reorganised tree of
+    // a million files). A digest hit is confirmed against the real
+    // fingerprint below, so a collision can only cost a comparison.
+    let digest = |fp: &[(PathBuf, u64)]| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        fp.hash(&mut h);
+        h.finish()
+    };
+    let mut dst_by_fp: HashMap<u64, Vec<&FileEntry>> = HashMap::new();
     for dir in extra_dst_dirs {
         let fp = dir_fingerprint(&sorted_dst_files, &dir.rel_path);
         if !fp.is_empty() {
-            dst_by_fp.entry(fp).or_default().push(dir);
+            dst_by_fp.entry(digest(&fp)).or_default().push(dir);
         }
     }
+    // True when `path` or one of its ancestors is in `claimed`: O(depth)
+    // instead of a scan over every claimed directory.
+    let claimed_at_or_above =
+        |claimed: &HashSet<PathBuf>, path: &Path| path.ancestors().any(|a| claimed.contains(a));
 
     // Process SRC dirs shallowest-first so parent renames are claimed before children.
     let mut sorted_src = new_src_dirs.to_vec();
@@ -593,9 +692,10 @@ fn detect_renamed_dirs(
 
     for src_dir in &sorted_src {
         // Skip if this dir is a subdirectory of an already-matched SRC rename.
-        if matched_src
-            .iter()
-            .any(|p| src_dir.rel_path.starts_with(p) && *p != src_dir.rel_path)
+        if src_dir
+            .rel_path
+            .parent()
+            .is_some_and(|p| claimed_at_or_above(&matched_src, p))
         {
             continue;
         }
@@ -605,11 +705,11 @@ fn detect_renamed_dirs(
             continue;
         }
 
-        if let Some(dst_candidates) = dst_by_fp.get(&fp) {
-            // Find first unmatched DST dir whose subtree hasn't been claimed yet.
+        if let Some(dst_candidates) = dst_by_fp.get(&digest(&fp)) {
+            // First DST dir with this fingerprint whose subtree is unclaimed.
             let pick = dst_candidates.iter().find(|d| {
-                !matched_dst.contains(&d.rel_path)
-                    && !matched_dst.iter().any(|p| d.rel_path.starts_with(p))
+                !claimed_at_or_above(&matched_dst, &d.rel_path)
+                    && dir_fingerprint(&sorted_dst_files, &d.rel_path) == fp
             });
             if let Some(dst_dir) = pick {
                 result.push(RenamedDir {
@@ -633,42 +733,53 @@ fn mtimes_close(a: SystemTime, b: SystemTime) -> bool {
 }
 
 /// Classify a SRC file against the DST file at the same (effective) path:
-/// size compare → mtime tolerance → hash compare. One implementation shared
-/// by the exact-case and case-insensitive arms, so a change to the tolerance
-/// or the hash guard can never land in one and miss the other.
+/// size compare, then mtime tolerance, then hash compare. One implementation
+/// shared by the exact-case and case-insensitive arms, so a change to the
+/// tolerance or the hash guard can never land in one and miss the other.
+///
+/// `via_rename`: the pair was only brought together by a detected directory
+/// rename. That detection trusts sizes alone, so two unrelated directories
+/// with the same layout pair up; their files must not take the mtime fast
+/// path, or the old content survives under the new name for good.
 fn classify_same_path(
     src: &FileEntry,
     dst: &FileEntry,
+    via_rename: bool,
     hashes: &HashMap<PathBuf, [u8; 32]>,
 ) -> MatchResult {
-    if src.size == dst.size {
-        if mtimes_close(src.mtime, dst.mtime) {
-            MatchResult::Identical
-        } else {
-            let sh = hashes.get(&src.abs_path);
-            let dh = hashes.get(&dst.abs_path);
-            if sh.is_some() && sh == dh {
-                MatchResult::IdenticalMtimeDiverged
-            } else {
-                MatchResult::SamePathDifferentContent
-            }
-        }
-    } else {
+    if src.size != dst.size {
         // Same path, different size: resolved in place as an overwrite;
         // never matched as a move from a different DST path.
-        MatchResult::SamePathDifferentContent
+        return MatchResult::SamePathDifferentContent;
+    }
+    let close = mtimes_close(src.mtime, dst.mtime);
+    if close && !via_rename {
+        return MatchResult::Identical;
+    }
+    let sh = hashes.get(&src.abs_path);
+    let dh = hashes.get(&dst.abs_path);
+    match (sh.is_some() && sh == dh, close) {
+        (true, true) => MatchResult::Identical,
+        (true, false) => MatchResult::IdenticalMtimeDiverged,
+        (false, _) => MatchResult::SamePathDifferentContent,
     }
 }
 
 /// Queue the hashes a same-path pair needs: both sides when the sizes match
-/// but mtimes diverged (content check), just SRC otherwise (GUI display
-/// only). Shared by the exact-case and case-insensitive Phase-1 arms.
+/// but the fast path cannot decide (mtimes diverged, or the pair came from a
+/// directory rename), just SRC otherwise (GUI display only). Shared by the
+/// exact-case and case-insensitive Phase-1 arms.
 ///
 /// The two sides are queued separately so Phase 2 can drive one hashing
 /// stream per drive (see `HashQueue`).
-fn queue_same_path_hashes(src: &FileEntry, dst: &FileEntry, needs_hash: &mut HashQueue) {
+fn queue_same_path_hashes(
+    src: &FileEntry,
+    dst: &FileEntry,
+    via_rename: bool,
+    needs_hash: &mut HashQueue,
+) {
     if src.size == dst.size {
-        if !mtimes_close(src.mtime, dst.mtime) {
+        if via_rename || !mtimes_close(src.mtime, dst.mtime) {
             needs_hash.src.insert((src.abs_path.clone(), src.size));
             needs_hash.dst.insert((dst.abs_path.clone(), dst.size));
         }

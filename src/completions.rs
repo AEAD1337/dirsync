@@ -1,12 +1,20 @@
+/// The completion script for `shell`, or `None` for an unsupported shell.
+pub fn script(shell: &str) -> Option<&'static str> {
+    match shell {
+        "bash" => Some(BASH),
+        "zsh" => Some(ZSH),
+        "fish" => Some(FISH),
+        "powershell" => Some(POWERSHELL),
+        _ => None,
+    }
+}
+
 /// Print a shell completion script for the given shell and exit.
 pub fn print(shell: &str) {
-    match shell {
-        "bash" => print!("{BASH}"),
-        "zsh" => print!("{ZSH}"),
-        "fish" => print!("{FISH}"),
-        "powershell" => print!("{POWERSHELL}"),
-        other => {
-            eprintln!("Unknown shell {other:?}. Supported: bash, zsh, fish, powershell");
+    match script(shell) {
+        Some(s) => print!("{s}"),
+        None => {
+            eprintln!("Unknown shell {shell:?}. Supported: bash, zsh, fish, powershell");
             std::process::exit(2);
         }
     }
@@ -29,8 +37,12 @@ _dirsync() {
         fi
     done
 
+    # Path candidates are split on newlines only, so a directory called
+    # "My Files" stays one candidate. Narrowed per branch, after every
+    # `compgen -W` on its path has run: -W splits its word list on IFS too.
     case "$prev" in
         --config)
+            local IFS=$'\n'
             COMPREPLY=($(compgen -f -- "$cur"))
             return ;;
         --port|-e|--exclude)
@@ -46,9 +58,12 @@ _dirsync() {
 
     # SRC / DST positional: directories; also offer the completions subcommand
     COMPREPLY=($(compgen -W "completions" -- "$cur"))
+    local IFS=$'\n'
     COMPREPLY+=($(compgen -d -- "$cur"))
 }
-complete -F _dirsync dirsync
+# -o filenames: readline quotes spaces in the inserted path and appends a
+# slash, not a space, after a directory.
+complete -o filenames -F _dirsync dirsync
 "#;
 
 // ── Zsh ──────────────────────────────────────────────────────────────────────
@@ -146,6 +161,27 @@ Register-ArgumentCompleter -Native -CommandName dirsync -ScriptBlock {
         return
     }
 
+    # Paths go back as completion text, so one containing a space or another
+    # character PowerShell would split on must be quoted, or it becomes two
+    # arguments. Single quotes are literal; an embedded one is doubled.
+    $quote = {
+        param($path)
+        if ($path -match "[\s'`$&(){}@;,|<>]") { "'" + ($path -replace "'", "''") + "'" } else { $path }
+    }
+
+    # The argument after --config is a file, not a directory.
+    $before = @($commandAst.CommandElements | Where-Object { $_.Extent.EndOffset -lt $cursorPosition })
+    $prev = if ($before.Count -gt 0) { "$($before[-1])" } else { '' }
+    if ($prev -eq '--config') {
+        $base = if ($wordToComplete) { $wordToComplete } else { '.' + [System.IO.Path]::DirectorySeparatorChar }
+        Get-ChildItem -Path "${base}*" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $kind = if ($_.PSIsContainer) { 'Directory' } else { 'File' }
+                [System.Management.Automation.CompletionResult]::new((& $quote $_.FullName), $_.Name, 'ProviderItem', $kind)
+            }
+        return
+    }
+
     # Offer 'completions' subcommand when no positional args yet
     if (-not ($tokens | Where-Object { -not "$_".StartsWith('-') })) {
         if ('completions' -like "$wordToComplete*") {
@@ -154,10 +190,10 @@ Register-ArgumentCompleter -Native -CommandName dirsync -ScriptBlock {
     }
 
     # Directory completions for SRC / DST
-    $base = if ($wordToComplete) { $wordToComplete } else { '.' }
+    $base = if ($wordToComplete) { $wordToComplete } else { '.' + [System.IO.Path]::DirectorySeparatorChar }
     Get-ChildItem -Directory -Path "${base}*" -ErrorAction SilentlyContinue |
         ForEach-Object {
-            [System.Management.Automation.CompletionResult]::new($_.FullName, $_.Name, 'ProviderItem', 'Directory')
+            [System.Management.Automation.CompletionResult]::new((& $quote $_.FullName), $_.Name, 'ProviderItem', 'Directory')
         }
 }
 "#;

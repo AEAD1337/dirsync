@@ -70,8 +70,10 @@ In scope:
   overwrites a file the planner did not report, or a rename/move match
   (head+tail fingerprinting) that maps a file onto the wrong target and
   destroys content.
-- **GUI server issues.** Bypassing the `Host` and `Origin` same-origin
-  middleware in `src/gui/server.rs`, DNS rebinding, CSRF against the
+- **GUI server issues.** Bypassing the session token or the `Host` and
+  `Origin` checks in `src/gui/server.rs` (`require_session`), DNS
+  rebinding, driving the server from another local user account without
+  the token, CSRF against the
   state-changing `POST`/`PUT` routes, XSS in the Svelte frontend, path or
   filesystem disclosure through `/api/v1/browse`, `/api/v1/complete`, or
   `/api/v1/stat` beyond what the UI is meant to expose, or a request that
@@ -95,8 +97,9 @@ Out of scope:
 - Attacks that require an attacker who already has your user account or
   administrator rights on the machine.
 - Anything in `frontend/node_modules` that is a build-time devDependency
-  and does not end up in the Vite bundle. Check `sbom-frontend.json`
-  before reporting: whatever is listed there does ship.
+  and does not end up in the Vite bundle. `sbom-frontend.json` lists the
+  whole frontend dependency tree, build tools included; the About dialog's
+  license table lists only what the bundle imports, so check there first.
 - Missing hardening headers, TLS, or rate limiting on a server bound to
   `127.0.0.1` for a single desktop user, absent a concrete exploit.
 - Findings from an automated scanner with no working reproduction.
@@ -106,14 +109,17 @@ Out of scope:
 These are understood and accepted, not vulnerabilities. They are listed so
 nobody spends time rediscovering them:
 
-- **The GUI server has no authentication.** It binds `127.0.0.1` only, and
-  the `Host`/`Origin` middleware blocks browser-driven cross-origin access
-  and unattributed `POST`/`PUT`. It does not, and cannot, stop another
-  process running as the same user on the same machine: such a process can
+- **The session token does not stop your own user account.** The server
+  binds `127.0.0.1` only; `Host`/`Origin` checks block browser-driven
+  cross-origin access, and a random per-launch token (opened in the URL
+  fragment, sent as `X-Dirsync-Token` or `?token=` on the WebSocket) blocks
+  other local users, who share loopback on Linux and in Windows RDP /
+  fast-user-switching sessions. A process running as *you* can read the
+  token from the browser or the console output, but such a process can
   already read and write the same files directly.
 - **The port is discoverable.** A local process can scan `127.0.0.1` and
-  find the GUI. The middleware limits what it can do, but the server's
-  existence is not secret.
+  find the GUI and fetch its static page. Without the token it cannot call
+  the API or open the WebSocket.
 - **No integrity signatures on release artifacts.** Binaries on the
   rolling release are not code-signed, and the tag is force-moved on every
   push to `main`, so a downloaded `rolling` artifact is not a stable,

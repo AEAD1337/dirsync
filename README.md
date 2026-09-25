@@ -1,6 +1,6 @@
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-1.1.6-blue?style=flat)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
+[![Version](https://img.shields.io/badge/Version-1.1.7-blue?style=flat)](https://github.com/AEAD1337/dirsync/releases) &nbsp;
 [![Release](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/release.yml) &nbsp;
 [![Audit](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml/badge.svg)](https://github.com/AEAD1337/dirsync/actions/workflows/audit.yml) &nbsp;
 [![CodeQL](https://github.com/AEAD1337/dirsync/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/AEAD1337/dirsync/security/code-scanning) &nbsp;
@@ -37,7 +37,7 @@ Available as both a CLI tool and an optional local web GUI. Runs on Windows, mac
 ```
 .\dirsync.exe D:\dirsync\SRC\ D:\dirsync\DST\
 Drive detection: SRC:SSD, DST:SSD → parallel I/O
-copy=1 overwrite=0 move=2 delete=1 symlink=0 identical=1 touch=0 (24.0 KB to transfer)
+copy=1 overwrite=0 move=2 delete=1 symlink=0 identical=1 touch=0 (400.0 KB to transfer)
   [========================================] 100% Done
 ```
 
@@ -94,9 +94,11 @@ Subcommands:
 Exclude patterns match individual path components, not the whole relative
 path: `*.tmp` and `node_modules` work, `build/temp` never matches.
 
-Exit status: `0` success, nothing to do, or dry run; `1` the run finished but
-one or more files failed and were skipped (listed on stderr); `2` usage error;
-`130` cancelled with Ctrl-C.
+Exit status: `0` success, nothing to do, or dry run; `1` finished, but one or
+more files failed or paths could not be read (listed on stderr); `2` usage
+error (bad flags, missing or invalid SRC/DST, a `--config` file that cannot be
+loaded); `3` fatal error, the sync could not be planned or started; `130`
+cancelled with Ctrl-C.
 
 **Safety checks**
 
@@ -106,8 +108,14 @@ Both the CLI and the GUI refuse a sync when:
   a source inside its destination would delete everything else in the
   destination as an orphan, and a destination inside its source would copy
   its own output one level deeper on every run
-- either endpoint is a system-critical directory (`C:\Windows`,
-  `C:\Program Files`, `/etc`, `/boot`, …), pass `--yolo` to override
+- either endpoint is, is inside, or contains a system-critical directory
+  (`C:\Windows`, `C:\Program Files`, `C:\Users` as a whole, `/etc`, `/boot`,
+  `/usr`, ...), pass `--yolo` to override
+
+A directory in SRC that cannot be read (permissions, a network share that
+dropped out) is never treated as empty: nothing below its counterpart in DST
+is deleted, the paths are listed on stderr, and the exit status is `1`. An
+unreadable SRC or DST root stops the run before anything is planned.
 
 Paths are canonicalized before these checks, so `..` traversal forms cannot
 slip past them.
@@ -131,7 +139,11 @@ dirsync ./src ./dst -e "target" -e ".*"
 dirsync --gui
 ```
 
-Opens `http://127.0.0.1:7373` in your default browser. The GUI is served locally; no data leaves the machine.
+Opens `http://127.0.0.1:7373/#t=<token>` in your default browser (the URL is
+also printed). The GUI is served locally; no data leaves the machine. The token
+is random per launch and gates every API call, so other users of the same
+machine cannot drive your instance. A tab opened without it (a bookmark, the
+bare address) shows a "not authorized" banner: open the printed URL instead.
 
 Passing SRC and DST alongside `--gui` pre-fills both paths and runs a preview
 immediately, provided both already exist as directories:
@@ -150,18 +162,27 @@ Saved automatically to the platform config directory:
 | macOS    | `~/Library/Application Support/dirsync/config.toml` |
 | Linux    | `~/.config/dirsync/config.toml` |
 
+The environment variable `DIRSYNC_CONFIG` names a different file for the
+default location (portable installs, test isolation).
+
 ```toml
 port = 7373
-theme = "system"          # "light" | "dark" | "system"
+theme = "light"           # "light" (default) | "dark" | "system"
 exclude_patterns = []
 last_src = "/path/to/src"
 last_dst = "/path/to/dst"
 ```
 
-CLI flags override config values for that run but do not write back to the file.
+CLI flags override config values for that run but never write back to the
+file: `-e` patterns apply to the session (the GUI shows them) and are stripped
+from every save, and `--port` goes to the server directly.
 `--config <PATH>` reads a different file instead, and in GUI mode every save
-(last-used paths, theme, exclusions) goes back to that file. A file that does
-not parse is kept as `config.toml.bad` and replaced with defaults.
+(last-used paths, theme, exclusions) goes back to that file. A `--config` file
+that is missing or cannot be read or parsed stops the run with exit status `2`:
+silently using defaults would drop its excludes. The default file is more
+forgiving: one that does not decode or parse is kept byte for byte as
+`config.toml.bad` and replaced with defaults. UTF-8 (with or without BOM) and
+UTF-16 with a BOM, which Windows PowerShell 5.1 writes, are both read.
 
 ## How it works
 
@@ -175,9 +196,11 @@ not parse is kept as `config.toml.bad` and replaced with defaults.
 
 The **Coverage** badge reports line coverage of the CLI build
 (`--no-default-features`), measured by `cargo llvm-cov` on every push that can
-change the code. The GUI modules are excluded on purpose: the axum server,
-WebSocket layer and embedded assets have no test harness, so counting them
-would only dilute the figure for the sync engine that the tests do exercise.
+change the code. The GUI modules are left out of that number because they are
+not compiled into the CLI build; they have their own tests
+(`tests/gui_handlers.rs` for the handlers, `tests/gui_server.rs` for the
+token and same-origin boundary on the real router), which run with the default
+features.
 
 Reproduce it locally with:
 

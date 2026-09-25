@@ -117,7 +117,7 @@ impl CliUi {
                 Ok(ProgressEvent::LogEntry(entry)) => {
                     // Walk warnings and the Ctrl-C notice: printed above the
                     // spinners rather than through the spinners' redraw.
-                    let _ = multi.println(entry.message);
+                    print_above(&multi, entry.message);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
                 _ => {}
@@ -169,7 +169,7 @@ impl CliUi {
                                 // Printed through the MultiProgress so the line
                                 // lands above the bar block instead of inside a
                                 // repaint (the Ctrl-C notice used eprintln!).
-                                let _ = self._multi.println(entry.message);
+                                print_above(&self._multi, entry.message);
                             }
                             _ => {}
                         },
@@ -286,6 +286,17 @@ impl CliUi {
 }
 
 /// The file bar as drawn while a file is worth showing.
+/// Print a log line above the bars. A hidden `MultiProgress` (stderr is not
+/// a terminal: cron, a scheduled task, `2>log`) drops `println` silently, so
+/// fall back to plain stderr there: warnings must survive redirection.
+fn print_above(multi: &MultiProgress, line: String) {
+    if multi.is_hidden() {
+        eprintln!("{line}");
+    } else {
+        let _ = multi.println(line);
+    }
+}
+
 fn file_bar_style() -> ProgressStyle {
     ProgressStyle::with_template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos:>3}% {msg}")
         .unwrap()

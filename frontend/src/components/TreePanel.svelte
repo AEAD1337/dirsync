@@ -1,7 +1,7 @@
 <script lang="ts">
   import ContextMenu from './ContextMenu.svelte';
-  import type { DisplayRow } from '../lib/treeUtils';
-  import { fmtCount, formatBytes, collapsedDirs, activeDirs } from '../lib/store';
+  import { ROW_HEIGHT, type DisplayRow, type PlanOp } from '../lib/treeUtils';
+  import { fmtCount, formatBytes, collapsedDirs, activeDirs, opErrors } from '../lib/store';
 
   let {
     rows = [],
@@ -14,6 +14,7 @@
     scanDetail = null,
     syncScrollTop = null,
     focusedIndex = -1,
+    revealSeq = 0,
     panelActive = false,
     containerHeight = $bindable(0),
     menuDisabled = false,
@@ -26,12 +27,13 @@
     side?: 'src' | 'dst';
     title?: string;
     dirSizes?: Record<string, number>;
-    headerStats?: { ops: number; bytes: number } | null;
+    headerStats?: { ops: number; bytes: number; approx?: boolean } | null;
     scanning?: boolean;
     scanCount?: number | null;
     scanDetail?: string | null;
     syncScrollTop?: number | null;
     focusedIndex?: number;
+    revealSeq?: number;
     panelActive?: boolean;
     containerHeight?: number;
     menuDisabled?: boolean;
@@ -44,7 +46,6 @@
   // Virtual scrolling: only render rows in the visible viewport plus a small
   // buffer. With fixed 22 px row height this keeps the DOM at ~50 nodes even
   // for a 100 k-file plan, making collapse/skip interactions instant.
-  const ROW_HEIGHT = 22; // must match .tree-dir/.tree-row/.tree-gap height in CSS
   const OVERSCAN = 8;   // extra rows rendered above and below the viewport
 
   let bodyEl: HTMLElement;
@@ -66,13 +67,15 @@
     }
   });
 
-  // Scroll the focused row into view only when focusedIndex actually changes
-  // (not on every mouse scroll). The prevFocusedForScroll guard prevents
-  // scrollTop from being a reactive trigger that fights the user's scrolling.
-  let prevFocusedForScroll = $state(-1);
+  // Scroll the focused row into view only on a keyboard move (revealSeq
+  // bumps), not on every mouse scroll nor when rows above it complete and
+  // shift its index. The early return keeps scrollTop from becoming a
+  // reactive trigger that fights the user's scrolling.
+  let lastReveal = 0;
   $effect(() => {
-    if (bodyEl && focusedIndex >= 0 && focusedIndex !== prevFocusedForScroll) {
-      prevFocusedForScroll = focusedIndex;
+    if (revealSeq === lastReveal) return;
+    lastReveal = revealSeq;
+    if (bodyEl && focusedIndex >= 0) {
       const rowTop = focusedIndex * ROW_HEIGHT;
       const rowBot = rowTop + ROW_HEIGHT;
       if (rowTop < scrollTop) {
@@ -108,11 +111,10 @@
     if (badge === '–') return 'badge-del';
     if (badge === '→') return 'badge-move';
     if (badge === '⇢') return 'badge-link';
-    if (badge === '~') return 'badge-touch';
-    return 'badge-err';
+    return 'badge-touch';
   }
 
-  function opDesc(op: import('../lib/types').OpEntry & { error?: string }): string {
+  function opDesc(op: PlanOp): string {
     const descs: Record<string, string> = {
       copy:         'Copy to destination',
       overwrite:    'Overwrite in destination',
@@ -138,14 +140,25 @@
     return base;
   }
 
-  function rowTooltip(row: DisplayRow): string {
+  function rowTooltip(row: DisplayRow, error: string | undefined): string {
     if (row.rowType !== 'op') return '';
     const op = row.op;
     const sizePart = op.size > 0 ? `  -  ${formatBytes(op.size)}` : '';
     const lines = [`${row.name}${sizePart}`];
     if (op.hash) lines.push(op.hash.slice(0, 8));
     lines.push(opDesc(op));
+    if (error) lines.push(`Failed: ${error}`);
     return lines.join('\n');
+  }
+
+  // Enter/Space on a DOM-focused row. Handled here and stopped: the window's
+  // tree handler would otherwise toggle the same directory straight back.
+  function onRowKey(e: KeyboardEvent, index: number, dirPath: string | null) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    onselect({ index });
+    if (dirPath !== null) toggleDir(dirPath);
   }
 
   function toggleDir(path: string) {
@@ -158,7 +171,7 @@
   const headerCount = $derived(scanning
     ? (scanCount !== null ? `${fmtCount(scanCount)} files scanned` : 'Scanning…')
     : headerStats
-      ? `${fmtCount(headerStats.ops)} ops · ${formatBytes(headerStats.bytes)}`
+      ? `${headerStats.approx ? '~' : ''}${fmtCount(headerStats.ops)} ops · ${headerStats.approx ? '~' : ''}${formatBytes(headerStats.bytes)}`
       : '');
 
 </script>
@@ -206,7 +219,7 @@
               role="button"
               tabindex="0"
               onclick={() => { onselect({ index: firstVisible + i }); toggleDir(row.path); }}
-              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { onselect({ index: firstVisible + i }); toggleDir(row.path); } }}
+              onkeydown={(e) => onRowKey(e, firstVisible + i, row.path)}
               oncontextmenu={(e) => onContextMenu(e, row.path)}
             >
               <span class="dir-chevron" class:collapsed={$collapsedDirs.has(row.path)}>▾</span>
@@ -216,23 +229,24 @@
               {/if}
             </div>
           {:else}
+            {@const error = $opErrors.get(row.path)}
             <div
               class="tree-row"
-              class:has-error={!!row.op.error}
+              class:has-error={!!error}
               class:row-focused={firstVisible + i === focusedIndex}
               style="padding-left: {8 + row.depth * 16}px"
-              title={rowTooltip(row)}
+              title={rowTooltip(row, error)}
               role="button"
               tabindex="0"
               onclick={() => onselect({ index: firstVisible + i })}
-              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onselect({ index: firstVisible + i }); }}
+              onkeydown={(e) => onRowKey(e, firstVisible + i, null)}
               oncontextmenu={(e) => onContextMenu(e, row.path)}
             >
               <span class="badge {badgeClass(row.op.badge)}">{row.op.badge}</span>
               <span class="row-path">{row.name}</span>
               <span class="row-size">{row.op.size > 0 ? formatBytes(row.op.size) : ''}</span>
-              {#if row.op.error}
-                <span class="row-error" title={row.op.error}>⚠ {row.op.error}</span>
+              {#if error}
+                <span class="row-error">⚠ {error}</span>
               {/if}
             </div>
           {/if}
@@ -356,7 +370,8 @@
     flex-shrink: 0;
   }
 
-  /* All row types share the same fixed height for pixel-perfect scroll alignment */
+  /* All row types share the same fixed height for pixel-perfect scroll
+     alignment: ROW_HEIGHT in lib/treeUtils.ts must match. */
   .tree-dir,
   .tree-row,
   .tree-gap {
@@ -421,7 +436,6 @@
   .badge-move { color: var(--accent-blue); }
   .badge-link { color: var(--accent-yellow); }
   .badge-touch { color: var(--text-muted); }
-  .badge-err  { color: var(--accent-red); }
 
   .row-path {
     flex: 1;
@@ -436,10 +450,12 @@
     flex-shrink: 0;
     min-width: 60px;
   }
+  .tree-row.has-error .row-path { color: var(--accent-red); }
   .row-error {
     color: var(--accent-red);
-    flex-shrink: 0;
-    max-width: 120px;
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 50%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

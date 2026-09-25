@@ -39,16 +39,52 @@ pub enum SyncOp {
     /// File content is identical but DST mtime diverged from SRC: fix mtime only.
     TouchMtime { src: PathBuf, dst: PathBuf },
     /// Create (or replace) a symlink at dst with the given target.
-    Symlink { target: PathBuf, dst: PathBuf },
+    Symlink {
+        target: PathBuf,
+        dst: PathBuf,
+        kind: LinkKind,
+    },
     /// Rename a DST entry whose path differs from the SRC path only in case.
-    /// On Windows (case-insensitive NTFS) a straight rename is a no-op; the
+    /// On a case-insensitive filesystem a straight rename can be a no-op; the
     /// executor uses a two-step temp-rename to force the directory-entry update.
-    #[cfg(windows)]
     CaseRename {
         from: PathBuf,
         to: PathBuf,
         is_dir: bool,
     },
+}
+
+/// How a SRC link has to be recreated. Only Windows distinguishes them:
+/// file and directory symlinks need different APIs (and a privilege), and a
+/// junction is a different reparse type that needs no privilege at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum LinkKind {
+    File,
+    Dir,
+    Junction,
+}
+
+/// The kind of the link at `path`, read without following it.
+pub fn link_kind(path: &Path) -> LinkKind {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink_dir() => {
+                if crate::sync::executor::junction::is_junction(path) {
+                    LinkKind::Junction
+                } else {
+                    LinkKind::Dir
+                }
+            }
+            _ => LinkKind::File,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        LinkKind::File
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -75,6 +111,13 @@ pub struct SyncPlan {
     /// Copy/Overwrite/Move/Symlink op on the async runtime before execution
     /// started. Preview-time data, like the rest of the plan.
     pub dir_blocked_targets: Vec<PathBuf>,
+    /// SRC or DST paths (absolute) the preview's walks could not read.
+    /// Nothing below an unreadable SRC path is deleted or used as a move
+    /// source, but the plan is still incomplete: callers must report these
+    /// and must not present the result as a clean sync. Not serialized: the
+    /// GUI already received each one as a warning log entry during the walk.
+    #[serde(skip)]
+    pub walk_errors: Vec<crate::error::FileError>,
 }
 
 impl SyncPlan {
@@ -122,7 +165,6 @@ impl SyncPlan {
                 | SyncOp::TouchMtime { dst, .. }
                 | SyncOp::MkDir { path: dst } => dst,
                 SyncOp::Move { to, .. } => to,
-                #[cfg(windows)]
                 SyncOp::CaseRename { to, .. } => to,
             };
             match rel_to_dst(target) {
@@ -162,7 +204,6 @@ impl SyncPlan {
                 SyncOp::TouchMtime { .. } => self.touch_count += 1,
                 SyncOp::Symlink { .. } => self.symlink_count += 1,
                 SyncOp::MkDir { .. } | SyncOp::RmDir { .. } => {}
-                #[cfg(windows)]
                 SyncOp::CaseRename { .. } => self.move_count += 1,
             }
         }
@@ -198,8 +239,8 @@ impl SyncPlan {
 }
 
 /// True when `from` and `to` are in the same directory and differ only in case.
-/// Used on Windows to detect renames that a straight `fs::rename` won't fix.
-#[cfg(windows)]
+/// Used on case-insensitive DSTs to detect renames a straight `fs::rename`
+/// may not apply.
 fn is_case_only_rename(from: &std::path::Path, to: &std::path::Path) -> bool {
     from != to
         && from.parent() == to.parent()
@@ -222,6 +263,7 @@ pub fn plan(
     let mut identical_count = 0;
 
     let renamed_dirs = &match_output.renamed_dirs;
+    let case_insensitive = match_output.case_insensitive;
 
     let src_dir_paths: HashSet<&PathBuf> = src_dirs.iter().map(|e| &e.rel_path).collect();
     let dst_dir_paths: HashSet<&PathBuf> = dst_dirs.iter().map(|e| &e.rel_path).collect();
@@ -263,24 +305,22 @@ pub fn plan(
         .collect();
     dirs_to_create.sort();
 
-    // Windows: a new SRC dir whose name matches an extra DST dir except for
-    // letter case is repaired with a dir-level CaseRename instead of the
-    // MkDir + RmDir pair: on NTFS that MkDir silently no-ops into the
+    // Case-insensitive DST: a new SRC dir whose name matches an extra DST dir
+    // except for letter case is repaired with a dir-level CaseRename instead
+    // of the MkDir + RmDir pair: there that MkDir silently no-ops into the
     // existing dir and the RmDir silently fails non-empty, leaving the old
     // case in place whenever the dir's contents changed alongside the rename
     // (identical contents take the fingerprint-rename path instead).
-    #[cfg(windows)]
     let extra_dst_dirs_lower: HashMap<String, &PathBuf> = dst_dir_paths
         .iter()
+        .filter(|_| case_insensitive)
         .filter(|d| !src_dir_paths.contains(*d))
         .filter(|d| find_in_rename_index(d, &dst_rename_index).is_none())
         .map(|d| (d.to_string_lossy().to_lowercase(), *d))
         .collect();
-    #[cfg(windows)]
     let mut case_renamed_dst_dirs: HashSet<&PathBuf> = HashSet::new();
 
     for dir in dirs_to_create {
-        #[cfg(windows)]
         if let Some(old) = extra_dst_dirs_lower.get(&dir.to_string_lossy().to_lowercase()) {
             ops.push(SyncOp::CaseRename {
                 from: dst_root.join(old),
@@ -301,8 +341,7 @@ pub fn plan(
     for rename in renamed_dirs {
         let from = dst_root.join(&rename.dst_rel);
         let to = dst_root.join(&rename.src_rel);
-        #[cfg(windows)]
-        if is_case_only_rename(&from, &to) {
+        if case_insensitive && is_case_only_rename(&from, &to) {
             ops.push(SyncOp::CaseRename {
                 from,
                 to,
@@ -320,12 +359,19 @@ pub fn plan(
     // ------------------------------------------------------------------
     // Move: file-level renames detected by the matcher.
     // ------------------------------------------------------------------
+    // A moved file whose mtime diverged also gets its TouchMtime now (the
+    // executor runs touches after moves), instead of on the next run.
     for entry in &match_output.matched {
         if let MatchResult::MovedFrom(old_dst_rel) = &entry.result {
             let from = dst_root.join(old_dst_rel);
             let to = dst_root.join(&entry.src.rel_path);
-            #[cfg(windows)]
-            if is_case_only_rename(&from, &to) {
+            if entry.touch_after_move {
+                ops.push(SyncOp::TouchMtime {
+                    src: entry.src.abs_path.clone(),
+                    dst: to.clone(),
+                });
+            }
+            if case_insensitive && is_case_only_rename(&from, &to) {
                 ops.push(SyncOp::CaseRename {
                     from,
                     to,
@@ -342,12 +388,11 @@ pub fn plan(
     }
 
     // ------------------------------------------------------------------
-    // CaseRename: case-insensitive path matches on Windows.
+    // CaseRename: case-insensitive path matches (set only on such a DST).
     // Emitted before Copy/Overwrite so the correct name is in place when
     // content is written. Identical/IdenticalMtimeDiverged entries get a
     // CaseRename too: the content op (or lack thereof) is handled below.
     // ------------------------------------------------------------------
-    #[cfg(windows)]
     for entry in &match_output.matched {
         if let Some(old_rel) = &entry.case_renamed_from {
             let from = dst_root.join(old_rel);
@@ -371,6 +416,7 @@ pub fn plan(
                     ops.push(SyncOp::Symlink {
                         target: target.clone(),
                         dst,
+                        kind: link_kind(&entry.src.abs_path),
                     });
                 } else if matches!(entry.result, MatchResult::NewInSrc) {
                     ops.push(SyncOp::Copy {
@@ -391,7 +437,6 @@ pub fn plan(
             MatchResult::Identical => {
                 // A case-renamed entry already counted as a move above;
                 // counting it again here reported the same file twice.
-                #[cfg(windows)]
                 if entry.case_renamed_from.is_some() {
                     continue;
                 }
@@ -437,9 +482,22 @@ pub fn plan(
         })
         .collect();
 
+    // On a case-insensitive DST a write to `photo.jpg` lands on the same
+    // file as an orphan `Photo.jpg`: compare ignoring case there.
+    let occupied_lower: HashSet<String> = if case_insensitive {
+        occupied_dsts
+            .iter()
+            .map(|p| p.to_string_lossy().to_lowercase())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     for orphan in &match_output.orphans {
         let path = adjusted_path(&orphan.dst, &dst_rename_index, dst_root);
-        if !occupied_dsts.contains(&path) {
+        let occupied = occupied_dsts.contains(&path)
+            || (case_insensitive
+                && occupied_lower.contains(&path.to_string_lossy().to_lowercase()));
+        if !occupied {
             ops.push(SyncOp::Delete {
                 path,
                 size: orphan.dst.size,
@@ -466,7 +524,6 @@ pub fn plan(
         } else if !src_dir_paths.contains(dst_p) {
             // Repaired in place by a synthesized dir-level CaseRename above:
             // removing it would delete the renamed directory.
-            #[cfg(windows)]
             if case_renamed_dst_dirs.contains(dst_p) {
                 continue;
             }
@@ -512,6 +569,7 @@ pub fn plan(
         dst_root: dst_root.to_path_buf(),
         hdd,
         dir_blocked_targets,
+        walk_errors: Vec::new(),
     };
     plan.recount();
     plan
@@ -523,16 +581,7 @@ fn find_in_rename_index<'a>(
     rel: &Path,
     index: &HashMap<PathBuf, &'a RenamedDir>,
 ) -> Option<&'a RenamedDir> {
-    let mut cur = rel;
-    loop {
-        if let Some(&r) = index.get(cur) {
-            return Some(r);
-        }
-        match cur.parent() {
-            Some(p) if !p.as_os_str().is_empty() => cur = p,
-            _ => return None,
-        }
-    }
+    super::matcher::deepest_rename(rel, index).map(|(r, _)| r)
 }
 
 /// Return the correct DST path for an entry, accounting for any directory
@@ -542,16 +591,9 @@ fn adjusted_path(
     dst_rename_index: &HashMap<PathBuf, &RenamedDir>,
     dst_root: &Path,
 ) -> PathBuf {
-    let mut cur = entry.rel_path.as_path();
-    loop {
-        if let Some(rename) = dst_rename_index.get(cur) {
-            let suffix = entry.rel_path.strip_prefix(cur).unwrap();
-            return dst_root.join(&rename.src_rel).join(suffix);
-        }
-        match cur.parent() {
-            Some(p) if !p.as_os_str().is_empty() => cur = p,
-            _ => return entry.abs_path.clone(),
-        }
+    match super::matcher::deepest_rename(&entry.rel_path, dst_rename_index) {
+        Some((rename, suffix)) => dst_root.join(&rename.src_rel).join(suffix),
+        None => entry.abs_path.clone(),
     }
 }
 
@@ -584,6 +626,7 @@ mod tests {
             dst_root: PathBuf::from("/dst"),
             hdd: false,
             dir_blocked_targets: vec![],
+            walk_errors: vec![],
         }
     }
 

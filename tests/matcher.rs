@@ -383,3 +383,25 @@ fn two_src_files_with_one_dst_twin_produce_one_move_and_one_copy() {
     assert_eq!((moves, news), (1, 1));
     assert!(out.orphans.is_empty());
 }
+
+#[test]
+fn the_case_probe_agrees_with_the_filesystem() {
+    let root = tempfile::TempDir::new().unwrap();
+    std::fs::write(root.path().join("Probe.txt"), b"x").unwrap();
+    let entries = dirsync::sync::walker::walk(
+        root.path(),
+        &dirsync::sync::walker::build_excludes(&[]),
+        "dst",
+        None,
+        &dirsync::sync::CancelToken::default(),
+    )
+    .unwrap()
+    .entries;
+
+    // The oracle: does the other spelling resolve to the same file here?
+    let expected = root.path().join("pROBE.TXT").exists();
+    assert_eq!(
+        dirsync::sync::matcher::dst_is_case_insensitive(&entries),
+        expected
+    );
+}

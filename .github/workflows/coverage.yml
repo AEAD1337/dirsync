@@ -35,13 +35,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Runs the code under test, which on a pull request is the PR's code: so it
+  # gets the workflow's read-only token and no persisted checkout
+  # credentials. Writing the badge back to main is the separate job below.
   coverage:
     runs-on: ubuntu-latest
-    permissions:
-      # Needed to commit the badge payload back to main.
-      contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Add llvm-tools
         run: rustup component add llvm-tools-preview
       # Third-party action pinned to a full commit SHA: a tag can be moved to
@@ -55,21 +57,42 @@ jobs:
       # keeps Node out of this job, since build.rs skips Vite without the gui
       # feature.
       - name: Collect coverage
-        run: cargo llvm-cov --no-default-features --summary-only --json --output-path coverage-summary.json
+        run: cargo llvm-cov --locked --no-default-features --summary-only --json --output-path coverage-summary.json
       - name: Report
         run: |
           pct=$(jq -r '.data[0].totals.lines.percent' coverage-summary.json)
           printf 'CLI line coverage: %.2f%%\n' "$pct" >> "$GITHUB_STEP_SUMMARY"
           jq -r '.data[0].totals | "functions: \(.functions.percent | floor)%, regions: \(.regions.percent | floor)%"' coverage-summary.json >> "$GITHUB_STEP_SUMMARY"
-      # The badge is served by shields.io's endpoint API from a JSON file
-      # committed to main: no third-party coverage service, no upload token,
-      # and no extra branch. `.github/badges/**` is in every paths-ignore list
-      # in this repository (Audit uses an allowlist and never matches it), so
-      # the commit made here cannot trigger another CI run.
+      - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        with:
+          name: coverage-summary
+          path: coverage-summary.json
+          retention-days: 1
+
+  # The badge is served by shields.io's endpoint API from a JSON file
+  # committed to main: no third-party coverage service, no upload token,
+  # and no extra branch. `.github/badges/**` is in every paths-ignore list
+  # in this repository (Audit uses an allowlist and never matches it), so
+  # the commit made here cannot trigger another CI run. This is the only job
+  # with write access, it never runs for a pull request, and it executes no
+  # repository code: it reads the summary the coverage job produced.
+  badge:
+    needs: coverage
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to commit the badge payload back to main.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-summary
       - name: Publish badge
-        if: github.event_name != 'pull_request'
         run: |
           pct=$(jq -r '.data[0].totals.lines.percent | floor' coverage-summary.json)
+          rm coverage-summary.json
           if   [ "$pct" -ge 80 ]; then color=brightgreen
           elif [ "$pct" -ge 70 ]; then color=green
           elif [ "$pct" -ge 50 ]; then color=yellow

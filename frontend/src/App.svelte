@@ -1,146 +1,131 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import TopBar from './components/TopBar.svelte';
   import BottomBar from './components/BottomBar.svelte';
   import TreePanel from './components/TreePanel.svelte';
   import AboutDialog from './components/dialogs/AboutDialog.svelte';
   import LicensesDialog from './components/dialogs/LicensesDialog.svelte';
-  import { api, ApiError, SyncWebSocket } from './lib/api';
-  import { config, src, dst, progress, ops, errors, isDark, scanState, scanProgress, collapsedDirs, activeDirs, planMeta, pathSep } from './lib/store';
-  import { buildDisplayRows, mergeRows, pathKey } from './lib/treeUtils';
-  import { get } from 'svelte/store';
-  import type { WsEvent, OpEntry, LogEntry, PlanSummary } from './lib/types';
   import LogModal from './components/dialogs/LogModal.svelte';
+  import { api, ApiError, SyncWebSocket, isAuthError } from './lib/api';
+  import { getToken } from './lib/auth';
+  import {
+    config, src, dst, progress, ops, opErrors, isDark, scanState, scanProgress, collapsedDirs,
+    activeDirs, planMeta, pathSep, unauthorized, EMPTY_PLAN_META,
+  } from './lib/store';
+  import { buildDisplayRows, mergeRows, sortOps, ROW_HEIGHT, type PlanOp } from './lib/treeUtils';
+  import {
+    treeNav, resolveFocus, nearestRow, focusRefAt, NO_FOCUS, TREE_KEYS, type FocusRef, type Rows,
+  } from './lib/treeNav';
+  import { isTrapActive } from './lib/focusTrap';
+  import { normalizeSep } from './lib/paths';
+  import { LOG_BUFFER_CAP, appendLog, mergeLog } from './lib/log';
+  import type { WsEvent, LogEntry, PlanSummary, SyncStatus } from './lib/types';
 
-  function normalizeSep(p: string, sep: string): string {
-    let out = sep === '\\' ? p.replace(/\//g, '\\') : p.replace(/\\/g, '/');
-    if (out && !out.endsWith(sep)) out += sep;
-    return out;
-  }
+  /** Virtual progress weight of every op that is not a copy/overwrite: mirrors OP_TOKEN_BYTES in src/sync/planner.rs. */
+  const OP_TOKEN_BYTES = 128 * 1024;
 
   let showAbout = $state(false);
   let showLicenses = $state(false);
   let showLog = $state(false);
-  let logEntries: LogEntry[] = $state([]);
   let previewError: string | null = $state(null);
+  // Informational banner (e.g. "the plan predates a new exclusion").
+  let notice: string | null = $state(null);
   let shuttingDown = $state(false);
-  let prevStatus = $state('idle');
+  let prevStatus: SyncStatus = $state('idle');
   let previewing = $state(false);
   let running = $state(false);
   let driveMode: 'auto' | 'ssd' | 'hdd' = $state('auto');
 
-  // Keyboard navigation state
+  // ---------- Keyboard navigation ----------
+
   let activePanel: 'src' | 'dst' = $state('src');
-  let focusedSrcIndex = $state(-1);
-  let focusedDstIndex = $state(-1);
+  // Focus is held by row identity and the index re-derived from the current
+  // rows: a bare index went stale on every new plan, collapse or completion.
+  let srcFocus: FocusRef = $state.raw(NO_FOCUS);
+  let dstFocus: FocusRef = $state.raw(NO_FOCUS);
+  // Bumped on keyboard moves only: the panel scrolls the focused row into
+  // view then, never merely because rows above it completed.
+  let srcReveal = $state(0);
+  let dstReveal = $state(0);
   let srcContainerHeight = $state(0);
   let dstContainerHeight = $state(0);
-  const ROW_HEIGHT = 22; // must match TreePanel.svelte
+
+  function setFocus(side: 'src' | 'dst', ref: FocusRef, reveal = false) {
+    if (side === 'src') { srcFocus = ref; if (reveal) srcReveal++; }
+    else { dstFocus = ref; if (reveal) dstReveal++; }
+  }
+
+  // When the focused row leaves the display (completed, collapsed away, a new
+  // plan), land on the row now at its position instead of dropping the
+  // keyboard position; keep the stored index current while rows shift.
+  function reanchor(side: 'src' | 'dst', rows: Rows, ref: FocusRef, index: number) {
+    if (ref.id === null) return;
+    if (index !== -1) {
+      if (index !== ref.index) setFocus(side, { id: ref.id, index });
+      return;
+    }
+    const near = nearestRow(rows, ref.index);
+    setFocus(side, near === -1 ? NO_FOCUS : focusRefAt(rows, near));
+  }
 
   function handleKeydown(e: KeyboardEvent) {
-    const target = e.target as HTMLElement;
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+    // A dialog or menu owns the keyboard while open (see focusTrap).
+    if (isTrapActive() || shuttingDown || $unauthorized) return;
+    // Only when a tree panel (or nothing) owns the focus. Everywhere else
+    // Enter/Space/arrows belong to the focused control, and Tab must run the
+    // browser's own order or the action row and menu are unreachable.
+    const target = e.target;
+    if (target !== document.body && !(target instanceof Element && target.closest('.tree-panel'))) return;
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
 
-    const rows = activePanel === 'src' ? srcRows : dstRows;
-    const focusedIndex = activePanel === 'src' ? focusedSrcIndex : focusedDstIndex;
-    const setFocused = (i: number) => {
-      if (activePanel === 'src') focusedSrcIndex = i;
-      else focusedDstIndex = i;
-    };
-
-    switch (e.key) {
-      case 'Tab': {
-        // Only when a tree panel (or nothing) owns the focus. Everywhere else
-        // the browser's own tab order must run, or the action row and menu
-        // are unreachable by keyboard.
-        if (target !== document.body && !target.closest('.tree-panel')) return;
-        e.preventDefault();
-        activePanel = activePanel === 'src' ? 'dst' : 'src';
-        break;
-      }
-      case 'ArrowUp':
-      case 'ArrowDown': {
-        e.preventDefault();
-        const dir = e.key === 'ArrowUp' ? -1 : 1;
-        let next = focusedIndex === -1
-          ? (dir === 1 ? 0 : rows.length - 1)
-          : focusedIndex + dir;
-        while (next >= 0 && next < rows.length && rows[next] === null) next += dir;
-        if (next >= 0 && next < rows.length && rows[next] !== null) setFocused(next);
-        break;
-      }
-      case 'PageUp':
-      case 'PageDown': {
-        e.preventDefault();
-        const containerHeight = activePanel === 'src' ? srcContainerHeight : dstContainerHeight;
-        const pageRows = Math.max(1, Math.floor(containerHeight / ROW_HEIGHT) - 1);
-        const dir = e.key === 'PageUp' ? -1 : 1;
-        let next = focusedIndex === -1
-          ? (dir === 1 ? 0 : rows.length - 1)
-          : Math.max(0, Math.min(rows.length - 1, focusedIndex + dir * pageRows));
-        while (next > 0 && next < rows.length - 1 && rows[next] === null) next += dir;
-        if (rows[next] !== null) setFocused(next);
-        break;
-      }
-      case 'Home': {
-        e.preventDefault();
-        let first = 0;
-        while (first < rows.length && rows[first] === null) first++;
-        if (first < rows.length) setFocused(first);
-        break;
-      }
-      case 'End': {
-        e.preventDefault();
-        let last = rows.length - 1;
-        while (last > 0 && rows[last] === null) last--;
-        if (last >= 0 && rows[last] !== null) setFocused(last);
-        break;
-      }
-      case 'ArrowLeft':
-      case 'ArrowRight':
-      case ' ':
-      case 'Enter': {
-        e.preventDefault();
-        const row = rows[focusedIndex];
-        if (!row) break;
-        if (e.key === 'ArrowLeft') {
-          const isExpanded = row.rowType === 'dir' && !get(collapsedDirs).has(row.path);
-          if (isExpanded) {
-            // Expanded dir: collapse it, stay focused here.
-            collapsedDirs.update(s => { s.add(row.path); return s; });
-          } else {
-            // Collapsed dir or file: navigate to parent.
-            for (let i = focusedIndex - 1; i >= 0; i--) {
-              const r = rows[i];
-              if (r && r.rowType === 'dir' && row.path.startsWith(r.path + '/')) {
-                setFocused(i);
-                break;
-              }
-            }
-          }
-        } else if (row.rowType === 'dir') {
-          const path = row.path;
-          collapsedDirs.update(s => {
-            if (e.key === 'ArrowRight') s.delete(path);
-            else if (s.has(path)) s.delete(path); else s.add(path); // Space or Enter
-            return s;
-          });
-        }
-        break;
-      }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      activePanel = activePanel === 'src' ? 'dst' : 'src';
+      return;
     }
+    if (!TREE_KEYS.has(e.key)) return;
+    e.preventDefault();
+
+    const side = activePanel;
+    const rows = side === 'src' ? srcRows : dstRows;
+    const height = side === 'src' ? srcContainerHeight : dstContainerHeight;
+    const pageRows = Math.max(1, Math.floor(height / ROW_HEIGHT) - 1);
+    const index = side === 'src' ? focusedSrcIndex : focusedDstIndex;
+    const action = treeNav(e.key, rows, index, pageRows, p => get(collapsedDirs).has(p));
+    if (!action) return;
+    if (action.kind === 'focus') {
+      setFocus(side, focusRefAt(rows, action.index), true);
+      return;
+    }
+    const path = action.path;
+    collapsedDirs.update(s => {
+      if (action.kind === 'collapse') s.add(path);
+      else if (action.kind === 'expand') s.delete(path);
+      else if (s.has(path)) s.delete(path);
+      else s.add(path);
+      return s;
+    });
   }
+
+  function onRowSelect(side: 'src' | 'dst', index: number) {
+    activePanel = side;
+    setFocus(side, focusRefAt(side === 'src' ? srcRows : dstRows, index));
+  }
+
+  // ---------- Server connection ----------
+
   const ws = new SyncWebSocket();
 
   // Scroll sync: each side holds the last scrollTop set by the OTHER panel.
   let srcSyncScrollTop: number | null = $state(null);
   let dstSyncScrollTop: number | null = $state(null);
 
-  // Accumulate completed rel-paths; applied to the display at most 10×/s.
+  // Accumulate completed rel-paths; applied to the display at most 10x/s.
   // `ops` itself stays stable during a run - only the `completed` Set is
   // reassigned - so the dir-size aggregation (the expensive part of the
   // derived chain) never recomputes per flush; only the row filtering does.
-  let pendingCompleted = $state(new Set<string>());
+  let pendingCompleted = new Set<string>();
   let completed = $state(new Set<string>());
   function flushCompleted() {
     if (pendingCompleted.size === 0) return;
@@ -150,7 +135,75 @@
     completed = next;
   }
 
+  // Per-op errors, batched the same way: a flood of failures publishes one
+  // new Map per flush instead of rebuilding the op list per message.
+  let pendingErrors = new Map<string, string>();
+  function flushErrors() {
+    if (pendingErrors.size === 0) return;
+    const batch = pendingErrors;
+    pendingErrors = new Map();
+    opErrors.update(m => {
+      const next = new Map(m);
+      for (const [path, message] of batch) next.set(path, message);
+      return next;
+    });
+  }
+  function clearErrors() {
+    pendingErrors = new Map();
+    opErrors.set(new Map());
+  }
+
+  // Client log. GET /log is fetched once at startup; live entries that arrive
+  // meanwhile wait in pendingLog and are merged behind the snapshot. After
+  // that the log is client-owned: Clear empties it for good (nothing
+  // refetches), and entries are appended in batches, capped like the server.
+  let logEntries: LogEntry[] = $state.raw([]);
+  let pendingLog: LogEntry[] = [];
+  let logLoaded = false;
+  let logHistoryDropped = false; // Clear pressed before the snapshot arrived
+
+  async function loadLog() {
+    let history: LogEntry[] = [];
+    try {
+      history = await api.getLog();
+    } catch { /* keep the live entries alone */ }
+    if (logHistoryDropped) history = [];
+    logEntries = mergeLog(history, pendingLog);
+    pendingLog = [];
+    logLoaded = true;
+  }
+
+  function flushLog() {
+    if (!logLoaded || pendingLog.length === 0) return;
+    logEntries = appendLog(logEntries, pendingLog);
+    pendingLog = [];
+  }
+
+  function clearLog() {
+    logEntries = [];
+    pendingLog = [];
+    if (!logLoaded) logHistoryDropped = true;
+  }
+
+  // Asked before each WebSocket reconnect: a 401 cannot be fixed by retrying.
+  async function probeServer(): Promise<boolean> {
+    if (get(unauthorized)) return false;
+    try {
+      await api.system();
+    } catch (err) {
+      if (isAuthError(err)) return false;
+    }
+    return true;
+  }
+
   onMount(async () => {
+    ws.onEvent = handleWsEvent;
+    ws.onNoToken = () => unauthorized.set(true);
+    ws.shouldReconnect = probeServer;
+    // Without a token every request would be refused: say so and stop.
+    if (!getToken()) { unauthorized.set(true); return; }
+
+    void loadLog();
     let autoPreview = false;
     try {
       const [cfg, sys] = await Promise.all([api.getConfig(), api.system()]);
@@ -158,11 +211,10 @@
       pathSep.set(sys.path_sep);
       if (cfg.last_src) src.set(normalizeSep(cfg.last_src, sys.path_sep));
       if (cfg.last_dst) dst.set(normalizeSep(cfg.last_dst, sys.path_sep));
-      isDark.set(cfg.theme === 'dark');
       autoPreview = !!sys.auto_preview;
     } catch { /* server may not be ready yet */ }
+    if (get(unauthorized)) return;
 
-    ws.onEvent = handleWsEvent;
     ws.connect();
 
     if (autoPreview) handlePreview(true);
@@ -172,9 +224,17 @@
   // An async onMount returns a Promise, which Svelte ignores: the interval
   // would leak on unmount if registered inside the async callback above.
   onMount(() => {
-    const completedTimer = setInterval(() => { flushCompleted(); refreshActiveDirs(); }, 100);
-    return () => clearInterval(completedTimer);
+    const flushTimer = setInterval(() => {
+      flushCompleted();
+      flushErrors();
+      flushLog();
+      refreshActiveDirs();
+    }, 100);
+    return () => clearInterval(flushTimer);
   });
+
+  // A 401 anywhere means this page's token is wrong: stop the socket too.
+  $effect(() => { if ($unauthorized) ws.disconnect(); });
 
   // Directories with work in flight, from two sources because neither alone
   // covers a run: completions say where the parallel small copies are but go
@@ -214,20 +274,40 @@
 
   onDestroy(() => ws.disconnect());
 
+  // Ops the plan holds without a display row (MkDir/RmDir). A Skip may drop
+  // some of them server-side, which the client cannot count exactly.
+  let hiddenOps = 0;
+
   // Populate the ops tree and plan metadata from a plan summary: the WS
   // plan_ready event, or GET /plan when recovering state after a reload.
   function applyPlan(plan: PlanSummary) {
-    // Sort once here so buildDisplayRows can do a single linear pass.
-    // pathKey orders a directory directly before its children, which is what
-    // keeps the rows buildDisplayRows emits ascending for mergeRows.
-    const sorted = plan.ops.slice().sort((a, b) => {
-      const ka = pathKey(a.rel_path), kb = pathKey(b.rel_path);
-      return ka < kb ? -1 : ka > kb ? 1 : 0;
-    });
-    ops.set(sorted);
+    // Sort once here so buildDisplayRows can do a single linear pass. The
+    // path key orders a directory directly before its children, which is
+    // what keeps the rows buildDisplayRows emits ascending for mergeRows.
+    ops.set(sortOps(plan.ops));
     completed = new Set();
     pendingCompleted = new Set();
+    hiddenOps = Math.max(0, plan.total_ops - plan.ops.length);
     planMeta.set({ totalOps: plan.total_ops, totalBytes: plan.total_bytes });
+  }
+
+  // End-of-run bookkeeping, for 'done' and 'cancelled' alike. The server
+  // drops the plan in both cases (replaying a cancelled one would redo moves
+  // and deletes that already ran), so Run must wait for a fresh preview.
+  // Failed rows stay, with their error. After a cancel the rows that never
+  // ran stay too, so the user sees what did not happen; after 'done' any row
+  // still without a completion only missed its op_completed event (a lagged
+  // broadcast channel) and is cleared.
+  function finishRun(cancelled: boolean) {
+    flushCompleted();
+    flushErrors();
+    const failed = get(opErrors);
+    const done = completed;
+    ops.update(list => list.filter(op => failed.has(op.rel_path) || (cancelled && !done.has(op.rel_path))));
+    completed = new Set();
+    driveMode = 'auto';
+    clearActiveDirs();
+    planMeta.set(EMPTY_PLAN_META);
   }
 
   // A reload mid-run reconnects the WS, but plan_ready only fires at preview
@@ -242,7 +322,7 @@
   // cancelled inside one tick window is otherwise never seen, and the flags
   // below would stay latched. Applying it from both sources is idempotent:
   // every branch is gated on an actual change of `prevStatus`.
-  function applyStatus(status: import('./lib/types').SyncStatus) {
+  function applyStatus(status: SyncStatus) {
     if ((status === 'running' || status === 'paused')
         && !planRecoveryTried && get(planMeta).totalOps === 0) {
       planRecoveryTried = true;
@@ -254,21 +334,8 @@
     if (get(scanState).active && prevStatus === 'previewing' && status !== 'previewing') {
       scanState.set({ active: false, src: null, dst: null });
     }
-    // When a run finishes, clear any ops that didn't receive an op_completed
-    // event (can happen if the broadcast channel lagged under heavy load).
-    if (status === 'done' && prevStatus !== 'done') {
-      flushCompleted();
-      ops.update(list => list.filter(op => op.error));
-      completed = new Set();
-      driveMode = 'auto';
-      clearActiveDirs();
-      // The plan is consumed (the server drops it too): Run must wait for a
-      // fresh preview rather than re-execute against the mirrored tree.
-      planMeta.set({ totalOps: 0, totalBytes: 0 });
-    }
-    if (status === 'cancelled' && prevStatus !== 'cancelled') {
-      driveMode = 'auto';
-      clearActiveDirs();
+    if ((status === 'done' || status === 'cancelled') && prevStatus !== status) {
+      finishRun(status === 'cancelled');
     }
     // Hand off to WS once the run is confirmed. A terminal status only counts
     // when it follows 'running': the tick sent just before POST /run was
@@ -278,7 +345,7 @@
         || (prevStatus === 'running' && (status === 'done' || status === 'cancelled')))) {
       running = false;
     }
-    // A cancelled preview produces no plan_ready and no error_occurred, so
+    // A cancelled preview produces no plan_ready and no preview_failed, so
     // without this the local flag stays set and Preview stays disabled.
     if (previewing && prevStatus === 'previewing' && status !== 'previewing') {
       previewing = false;
@@ -286,77 +353,75 @@
     prevStatus = status;
   }
 
-  function handleWsEvent(e: WsEvent) {
-    if (e.type === 'progress_update') {
-      progress.set(e);
-      copyingDir = e.current_dir ?? null;
-      applyStatus(e.status);
-    } else if (e.type === 'status_changed') {
-      applyStatus(e.status);
-    } else if (e.type === 'error_occurred') {
-      if (e.path === 'preview') {
-        previewError = e.message;
-        previewing = false;
-        scanState.set({ active: false, src: null, dst: null });
-        scanProgress.set({ srcPath: null, dstPath: null, globalPhase: null, globalPath: null });
-      } else {
-        errors.update(list => [...list, { path: e.path, message: e.message }]);
-        ops.update(list =>
-          list.map(op => op.rel_path === e.path ? { ...op, error: e.message } : op)
-        );
-      }
-    } else if (e.type === 'ops_completed') {
-      const now = Date.now();
-      for (const path of e.rel_paths) {
-        pendingCompleted.add(path);
-        const dir = parentDir(path);
-        if (dir) dirLastSeen.set(dir, now);
-      }
-    } else if (e.type === 'shutdown') {
-      // Stop reconnecting first: the server is going away on purpose. Then
-      // try to close the tab; browsers refuse that for tabs a script did not
-      // open, so the overlay below is what the user actually sees.
-      shuttingDown = true;
-      ws.disconnect();
-      window.close();
-    } else if (e.type === 'scan_update') {
-      scanState.update(s => ({
-        ...s,
-        [e.side]: e.file_count,
-      }));
-      if (e.side === 'src') {
-        scanProgress.update(s => ({ ...s, srcPath: 'Done.' }));
-      } else if (e.side === 'dst') {
-        scanProgress.update(s => ({ ...s, dstPath: 'Done.' }));
-      }
-    } else if (e.type === 'scan_progress') {
-      if (e.phase === 'walking_src') {
-        scanProgress.update(s => ({ ...s, srcPath: e.path, globalPhase: null }));
-      } else if (e.phase === 'walking_dst') {
-        scanProgress.update(s => ({ ...s, dstPath: e.path, globalPhase: null }));
-      } else if (e.phase === 'hashing' || e.phase === 'planning') {
-        const phase = e.phase; // narrowed to 'hashing' | 'planning' for the callback
-        scanProgress.update(s => ({ ...s, globalPhase: phase, globalPath: e.path }));
-      }
-    } else if (e.type === 'log_entry') {
-      logEntries = [...logEntries, { level: e.level, message: e.message, run: e.run }];
-    } else if (e.type === 'drive_mode') {
-      driveMode = e.hdd ? 'hdd' : 'ssd';
-    } else if (e.type === 'plan_ready') {
-      applyPlan(e);
-      errors.set([]);
-      scanState.set({ active: false, src: null, dst: null });
-      scanProgress.set({ srcPath: null, dstPath: null, globalPhase: null, globalPath: null });
-      previewing = false;
-    }
+  function resetScan() {
+    scanState.set({ active: false, src: null, dst: null });
+    scanProgress.set({ srcPath: null, dstPath: null, globalPhase: null, globalPath: null });
   }
 
-  async function openLog() {
-    showLog = true;
-    if (logEntries.length === 0) {
-      try {
-        logEntries = await api.getLog();
-      } catch { /* server may not be ready */ }
+  function handleWsEvent(e: WsEvent) {
+    switch (e.type) {
+      case 'progress_update':
+        progress.set(e);
+        copyingDir = e.current_dir ?? null;
+        applyStatus(e.status);
+        break;
+      case 'status_changed':
+        applyStatus(e.status);
+        break;
+      case 'preview_failed':
+        previewError = e.message;
+        previewing = false;
+        resetScan();
+        break;
+      case 'error_occurred':
+        pendingErrors.set(e.path, e.message);
+        break;
+      case 'ops_completed': {
+        const now = Date.now();
+        for (const path of e.rel_paths) {
+          pendingCompleted.add(path);
+          const dir = parentDir(path);
+          if (dir) dirLastSeen.set(dir, now);
+        }
+        break;
+      }
+      case 'shutdown':
+        // Stop reconnecting first: the server is going away on purpose. Then
+        // try to close the tab; browsers refuse that for tabs a script did not
+        // open, so the overlay below is what the user actually sees.
+        shuttingDown = true;
+        ws.disconnect();
+        window.close();
+        break;
+      case 'scan_update':
+        scanState.update(s => ({ ...s, [e.side]: e.file_count }));
+        if (e.side === 'src') scanProgress.update(s => ({ ...s, srcPath: 'Done.' }));
+        else scanProgress.update(s => ({ ...s, dstPath: 'Done.' }));
+        break;
+      case 'scan_progress':
+        if (e.phase === 'walking_src') {
+          scanProgress.update(s => ({ ...s, srcPath: e.path, globalPhase: null }));
+        } else if (e.phase === 'walking_dst') {
+          scanProgress.update(s => ({ ...s, dstPath: e.path, globalPhase: null }));
+        } else {
+          const phase = e.phase; // narrowed to 'hashing' | 'planning' for the callback
+          scanProgress.update(s => ({ ...s, globalPhase: phase, globalPath: e.path }));
+        }
+        break;
+      case 'log_entry':
+        pendingLog.push({ level: e.level, message: e.message, run: e.run });
+        // Bound the backlog while GET /log is still in flight.
+        if (pendingLog.length >= 2 * LOG_BUFFER_CAP) pendingLog = pendingLog.slice(-LOG_BUFFER_CAP);
+        break;
+      case 'drive_mode':
+        driveMode = e.hdd ? 'hdd' : 'ssd';
+        break;
+      case 'plan_ready':
+        applyPlan(e);
+        clearErrors();
+        resetScan();
+        previewing = false;
+        break;
     }
   }
 
@@ -372,11 +437,12 @@
     previewing = true;
     driveMode = 'auto';
     ops.set([]);
-    errors.set([]);
+    clearErrors();
     skippedPrefixes = [];
     previewError = null;
+    notice = null;
     clearActiveDirs();
-    planMeta.set({ totalOps: 0, totalBytes: 0 });
+    planMeta.set(EMPTY_PLAN_META);
     collapsedDirs.set(new Set());
     scanState.set({ active: true, src: null, dst: null });
     previewedSrc = $src;
@@ -391,6 +457,7 @@
       // already active server-side (e.g. F5 during a run). That's the server
       // protecting the run: recover state silently instead of alerting.
       if (auto && err instanceof ApiError && err.status === 409) return;
+      if (isAuthError(err)) return; // the banner says it
       alert(`Preview failed: ${err}`);
     }
   }
@@ -398,17 +465,23 @@
   async function handleRun() {
     if (running) return;
     running = true;
-    errors.set([]);
+    clearErrors();
     try {
       await api.run(false, skippedPrefixes, $src, $dst);
     } catch (err) {
       running = false;
-      alert(`Run failed: ${err}`);
+      if (!isAuthError(err)) alert(`Run failed: ${err}`);
     }
   }
 
-  async function handlePause() {
-    try { await api.pause(); } catch (err) { console.error('Pause failed:', err); }
+  // Resolves to the pause state the server now holds, or null on failure.
+  async function handlePause(): Promise<boolean | null> {
+    try {
+      return (await api.pause()).paused;
+    } catch (err) {
+      console.error('Pause failed:', err);
+      return null;
+    }
   }
   async function handleCancel() {
     try { await api.cancel(); } catch (err) { console.error('Cancel failed:', err); }
@@ -425,20 +498,34 @@
     if (!skippedPrefixes.includes(prefix)) skippedPrefixes = [...skippedPrefixes, prefix];
     let removedOps = 0;
     let removedBytes = 0;
+    // Same rule as SyncPlan::without_skipped + recount on the server: deletes
+    // survive a skip; a copy/overwrite weighs its size, every other op the
+    // fixed progress token.
     ops.update(list => list.filter(op => {
       if (op.kind === 'delete') return true;
       const keep = !op.rel_path.startsWith(prefix + '/') && op.rel_path !== prefix;
-      if (!keep) { removedOps++; removedBytes += op.size; }
+      if (!keep) {
+        removedOps++;
+        removedBytes += op.kind === 'copy' || op.kind === 'overwrite' ? op.size : OP_TOKEN_BYTES;
+      }
       return keep;
     }));
     // Keep the header honest: the server recounts the real plan at run time,
-    // the display must not keep quoting the pre-skip totals until then.
+    // the display must not keep quoting the pre-skip totals until then. The
+    // plan's row-less MkDirs under the prefix are dropped there too, but the
+    // client cannot see them, so the totals are marked approximate when the
+    // plan has any.
     planMeta.update(m => ({
       totalOps: Math.max(0, m.totalOps - removedOps),
       totalBytes: Math.max(0, m.totalBytes - removedBytes),
+      approx: m.approx || (removedOps > 0 && hiddenOps > 0),
     }));
   }
 
+  // Exclusion patterns shape the scan, so they only take effect at the next
+  // preview (unlike Skip, which filters the stored plan at run time). The plan
+  // on screen predates the new pattern: mark it stale so Run needs a fresh
+  // preview rather than acting on the excluded paths.
   async function handleExclude(e: { path: string }) {
     if (runActive) return;
     const pattern = prompt('Add exclusion pattern:', e.path.split(/[\\/]/).pop() ?? '');
@@ -449,7 +536,12 @@
       // full config, including the last-used paths it owns.
       config.set(await api.putConfig({ exclude_patterns }));
     } catch (err) {
-      alert(`Failed to save exclusion: ${err}`);
+      if (!isAuthError(err)) alert(`Failed to save exclusion: ${err}`);
+      return;
+    }
+    if (get(planMeta).totalOps > 0) {
+      planMeta.set(EMPTY_PLAN_META);
+      notice = `Exclusion pattern "${pattern}" saved. The plan shown predates it: run Preview again before Run.`;
     }
   }
 
@@ -462,6 +554,20 @@
     srcSyncScrollTop = e.scrollTop;
     setTimeout(() => { srcSyncScrollTop = null; }, 0);
   }
+
+  // Theme: 'system' follows the OS preference, live.
+  $effect(() => {
+    const theme = $config.theme;
+    if (theme !== 'system') {
+      isDark.set(theme === 'dark');
+      return;
+    }
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = () => isDark.set(mq.matches);
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  });
 
   $effect(() => { document.body?.classList.toggle('dark', $isDark); });
 
@@ -485,7 +591,7 @@
       previewedSrc &&
       ($src !== previewedSrc || $dst !== previewedDst)
     ) {
-      planMeta.set({ totalOps: 0, totalBytes: 0 });
+      planMeta.set(EMPTY_PLAN_META);
       ops.set([]);
     }
   });
@@ -494,23 +600,28 @@
   // Symlinks and touches belong with the writes: both modify the destination.
   // The kind-filtered lists are completion-agnostic (stable during a run) so
   // the dir-size aggregations below don't recompute on every flush; the
-  // per-panel row lists then drop completed ops.
+  // per-panel row lists then drop completed ops, unless they failed.
   const srcKindOps = $derived($ops.filter(op => op.kind === 'copy' || op.kind === 'overwrite' || op.kind === 'move' || op.kind === 'symlink' || op.kind === 'touch'));
   const dstKindOps = $derived($ops.filter(op => op.kind === 'delete' || op.kind === 'move' || op.kind === 'dir-rename' || op.kind === 'case-rename'));
-  const srcOps = $derived(srcKindOps.filter(op => op.error || !completed.has(op.rel_path)));
-  const dstOps = $derived(dstKindOps.filter(op => op.error || !completed.has(op.rel_path)));
+  const srcOps = $derived(srcKindOps.filter(op => !completed.has(op.rel_path) || $opErrors.has(op.rel_path)));
+  const dstOps = $derived(dstKindOps.filter(op => !completed.has(op.rel_path) || $opErrors.has(op.rel_path)));
 
   // Build per-side display rows, then merge to align matching paths with gap placeholders.
   const srcDisplayRows = $derived(buildDisplayRows(srcOps, $collapsedDirs));
   const dstDisplayRows = $derived(buildDisplayRows(dstOps, $collapsedDirs));
   const mergedRows = $derived(mergeRows(srcDisplayRows, dstDisplayRows));
-  const srcRows = $derived(mergedRows.map(r => r.src));
-  const dstRows = $derived(mergedRows.map(r => r.dst));
+  const srcRows: Rows = $derived(mergedRows.map(r => r.src));
+  const dstRows: Rows = $derived(mergedRows.map(r => r.dst));
+
+  const focusedSrcIndex = $derived(resolveFocus(srcRows, srcFocus));
+  const focusedDstIndex = $derived(resolveFocus(dstRows, dstFocus));
+  $effect(() => reanchor('src', srcRows, srcFocus, focusedSrcIndex));
+  $effect(() => reanchor('dst', dstRows, dstFocus, focusedDstIndex));
 
   // Dir sizes = aggregate bytes of the given ops under each ancestor dir, so a
   // parent directory shows only what will actually be transferred, not its
   // full on-disk size (which may include untouched files already in sync).
-  function computeOpDirSizes(ops: (OpEntry & { error?: string })[]): Record<string, number> {
+  function computeOpDirSizes(ops: PlanOp[]): Record<string, number> {
     const sizes: Record<string, number> = {};
     for (const op of ops) {
       const parts = op.rel_path.split('/').filter(Boolean);
@@ -534,15 +645,20 @@
   // instead of pretending to affect it.
   const runActive = $derived(running || currentStatus === 'running' || currentStatus === 'paused');
 
-  const srcScanDetail = $derived($scanProgress.globalPhase === 'hashing'
-    ? ($scanProgress.globalPath ? `Fingerprinting  ${$scanProgress.globalPath}` : 'Matching…')
-    : $scanProgress.globalPhase === 'planning' ? 'Planning…'
-    : $scanProgress.srcPath ?? null);
+  // Hashing and planning are global phases shown on both panels; the walks
+  // are per side.
+  function scanDetail(sidePath: string | null): string | null {
+    const s = $scanProgress;
+    if (s.globalPhase === 'hashing') return s.globalPath ? `Fingerprinting  ${s.globalPath}` : 'Matching…';
+    if (s.globalPhase === 'planning') return 'Planning…';
+    return sidePath;
+  }
+  const srcScanDetail = $derived(scanDetail($scanProgress.srcPath));
+  const dstScanDetail = $derived(scanDetail($scanProgress.dstPath));
 
-  const dstScanDetail = $derived($scanProgress.globalPhase === 'hashing'
-    ? ($scanProgress.globalPath ? `Fingerprinting  ${$scanProgress.globalPath}` : 'Matching…')
-    : $scanProgress.globalPhase === 'planning' ? 'Planning…'
-    : $scanProgress.dstPath ?? null);
+  const headerStats = $derived($planMeta.totalOps > 0
+    ? { ops: $planMeta.totalOps, bytes: $planMeta.totalBytes, approx: !!$planMeta.approx }
+    : null);
 </script>
 
 <!-- No beforeunload shutdown beacon: it fired on reload too, killing the server
@@ -562,14 +678,28 @@
     oncancel={handleCancel}
     onshowAbout={() => showAbout = true}
     onshowLicenses={() => showLicenses = true}
-    onshowLog={openLog}
+    onshowLog={() => showLog = true}
   />
 
+  {#if $unauthorized}
+    <div class="banner banner-error" role="alert">
+      <span class="banner-icon">⚠</span>
+      <span class="banner-msg">This page is not authorized. Open the URL printed by dirsync in the terminal.</span>
+    </div>
+  {/if}
+
   {#if previewError}
-    <div class="preview-error">
-      <span class="preview-error-icon">⚠</span>
-      <span class="preview-error-msg">{previewError}</span>
-      <button class="preview-error-close" onclick={() => previewError = null}>✕</button>
+    <div class="banner banner-error" role="alert">
+      <span class="banner-icon">⚠</span>
+      <span class="banner-msg mono">{previewError}</span>
+      <button type="button" class="banner-close" aria-label="Dismiss" onclick={() => previewError = null}>✕</button>
+    </div>
+  {/if}
+
+  {#if notice}
+    <div class="banner banner-info" role="status">
+      <span class="banner-msg">{notice}</span>
+      <button type="button" class="banner-close" aria-label="Dismiss" onclick={() => notice = null}>✕</button>
     </div>
   {/if}
 
@@ -584,10 +714,11 @@
       scanDetail={srcScanDetail}
       syncScrollTop={srcSyncScrollTop}
       focusedIndex={focusedSrcIndex}
+      revealSeq={srcReveal}
       panelActive={activePanel === 'src'}
       bind:containerHeight={srcContainerHeight}
       menuDisabled={runActive}
-      onselect={(e) => { activePanel = 'src'; focusedSrcIndex = e.index; }}
+      onselect={(e) => onRowSelect('src', e.index)}
       onskip={handleSkip}
       onexclude={handleExclude}
       onscrolled={onSrcScrolled}
@@ -597,16 +728,17 @@
       side="dst"
       title="Destination"
       dirSizes={dstDirSizes}
-      headerStats={$planMeta.totalOps > 0 ? { ops: $planMeta.totalOps, bytes: $planMeta.totalBytes } : null}
+      headerStats={headerStats}
       scanning={$scanState.active}
       scanCount={$scanState.dst}
       scanDetail={dstScanDetail}
       syncScrollTop={dstSyncScrollTop}
       focusedIndex={focusedDstIndex}
+      revealSeq={dstReveal}
       panelActive={activePanel === 'dst'}
       bind:containerHeight={dstContainerHeight}
       menuDisabled={runActive}
-      onselect={(e) => { activePanel = 'dst'; focusedDstIndex = e.index; }}
+      onselect={(e) => onRowSelect('dst', e.index)}
       onskip={() => {}}
       onexclude={handleExclude}
       onscrolled={onDstScrolled}
@@ -626,7 +758,7 @@
   <LogModal
     entries={logEntries}
     onclose={() => showLog = false}
-    onclear={() => { logEntries = []; }}
+    onclear={clearLog}
   />
 {/if}
 {#if shuttingDown}
@@ -705,30 +837,38 @@
     background: var(--bg);
   }
 
-  .preview-error {
+  .banner {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: var(--error-bg);
-    border-bottom: 1px solid var(--accent-red);
     font-size: 12px;
-    color: var(--accent-red);
     flex-shrink: 0;
   }
-  .preview-error-icon { font-size: 14px; flex-shrink: 0; }
-  .preview-error-msg { flex: 1; font-family: var(--font-mono); word-break: break-all; }
-  .preview-error-close {
+  .banner-error {
+    background: var(--error-bg);
+    border-bottom: 1px solid var(--accent-red);
+    color: var(--accent-red);
+  }
+  .banner-info {
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--accent-blue);
+    color: var(--text);
+  }
+  .banner-icon { font-size: 14px; flex-shrink: 0; }
+  .banner-msg { flex: 1; }
+  .banner-msg.mono { font-family: var(--font-mono); word-break: break-all; }
+  .banner-close {
     background: none;
     border: none;
     cursor: pointer;
-    color: var(--accent-red);
+    color: inherit;
     font-size: 12px;
     padding: 0 4px;
     flex-shrink: 0;
     opacity: 0.7;
   }
-  .preview-error-close:hover { opacity: 1; }
+  .banner-close:hover { opacity: 1; }
 
   .shutdown-overlay {
     position: fixed;

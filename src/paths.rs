@@ -88,8 +88,10 @@ pub fn validate_sync_path(path: &Path, must_exist: bool, yolo: bool) -> Result<(
     Ok(())
 }
 
-/// Returns true if `path` is (or is inside) a well-known system directory that
-/// should never be used as a sync source or destination.
+/// Returns true if `path` is, is inside, or *contains* a well-known system
+/// directory that should never be used as a sync source or destination. A
+/// parent counts because a mirror into it deletes everything it holds that
+/// SRC lacks: a DST of `/usr` wipes `/usr/bin`.
 pub fn is_system_critical(path: &Path) -> bool {
     // Unix filesystem root ("/") has no parent. On Windows we do NOT use
     // parent()==None because bare drive-letter paths like "D:" (no backslash)
@@ -125,9 +127,10 @@ pub fn is_system_critical(path: &Path) -> bool {
             "c:/recovery",
             "c:/users/default",
         ];
+        let p = p.trim_end_matches('/');
         critical
             .iter()
-            .any(|c| p == *c || p.starts_with(&format!("{c}/")))
+            .any(|c| p == *c || p.starts_with(&format!("{c}/")) || c.starts_with(&format!("{p}/")))
     }
 
     #[cfg(not(windows))]
@@ -144,10 +147,25 @@ pub fn is_system_critical(path: &Path) -> bool {
             "/usr/bin",
             "/usr/sbin",
             "/usr/lib",
+            "/usr/lib64",
+            "/usr/libexec",
+            "/usr/share",
+            "/var/lib",
+            "/var/db",
             "/boot",
             "/root",
+            // macOS: canonicalize() resolves /etc and /var to these, and the
+            // guard runs on canonical paths. Not all of /private/var: the
+            // per-user temp directories live in /private/var/folders.
+            "/private/etc",
+            "/private/var/db",
+            "/private/var/root",
+            "/System",
+            "/Library",
         ];
-        critical.iter().any(|c| path.starts_with(c))
+        critical
+            .iter()
+            .any(|c| path.starts_with(c) || Path::new(c).starts_with(path))
     }
 }
 

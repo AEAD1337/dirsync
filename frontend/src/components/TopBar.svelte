@@ -1,7 +1,11 @@
 <script lang="ts">
   import { api } from '../lib/api';
   import { src, dst, config, isDark, planMeta, pathSep } from '../lib/store';
-  import type { BrowseEntry } from '../lib/types';
+  import { convertSep as toNativeSep, normalizeSep as withTrailingSep, isRootPath, parentPath } from '../lib/paths';
+  import { trapFocus } from '../lib/focusTrap';
+  import type { BrowseEntry, SyncStatus, Theme } from '../lib/types';
+
+  type Side = 'src' | 'dst';
 
   const {
     status = 'idle',
@@ -16,13 +20,14 @@
     onshowLicenses,
     onshowLog,
   }: {
-    status?: string;
+    status?: SyncStatus;
     previewing?: boolean;
     running?: boolean;
     driveMode?: 'auto' | 'ssd' | 'hdd';
     onpreview: () => void;
     onrun: () => void;
-    onpause: () => void;
+    /** Resolves to the pause state the server now holds, or null on failure. */
+    onpause: () => Promise<boolean | null>;
     oncancel: () => void;
     onshowAbout: () => void;
     onshowLicenses: () => void;
@@ -30,8 +35,12 @@
   } = $props();
 
   let menuOpen = $state(false);
+  // A pause was requested and the executor has not reached its next
+  // checkpoint yet. POST /pause toggles, so a second click in that window
+  // would silently resume: the button stays disabled until the state settles.
   let pausing = $state(false);
-  let browsingSide: 'src' | 'dst' | null = $state(null);
+  let pauseInFlight = $state(false);
+  let browsingSide: Side | null = $state(null);
   let browseEntries: BrowseEntry[] = $state([]);
   let browsePath = $state('');
 
@@ -49,13 +58,20 @@
 
   let statTimers: Record<string, ReturnType<typeof setTimeout>> = {};
   let completeTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+  // Whether each input has focus: a completion answering after blur must not
+  // reopen the dropdown.
+  let inputFocused: Record<Side, boolean> = { src: false, dst: false };
 
   // One in-flight stat per side: a path on a stalled network share or a
   // sleeping drive can take seconds to answer, and the 500ms poller below
   // must not stack requests behind it.
   let statInFlight: Record<string, boolean> = {};
 
-  async function runStatCheck(path: string, side: 'src' | 'dst') {
+  function pathOf(side: Side): string {
+    return side === 'src' ? $src : $dst;
+  }
+
+  async function runStatCheck(path: string, side: Side) {
     if (statInFlight[side]) return;
     statInFlight[side] = true;
     let ok = false;
@@ -68,12 +84,12 @@
       statInFlight[side] = false;
     }
     // Drop the result if the user edited the path while the stat was running.
-    if (path !== (side === 'src' ? $src : $dst)) return;
+    if (path !== pathOf(side)) return;
     if (side === 'src') srcExists = ok;
     else dstExists = ok;
   }
 
-  function scheduleStatCheck(path: string, side: 'src' | 'dst') {
+  function scheduleStatCheck(path: string, side: Side) {
     clearTimeout(statTimers[side]);
     if (!path.trim()) {
       if (side === 'src') srcExists = null;
@@ -95,43 +111,47 @@
     return () => clearInterval(timer);
   });
 
-  function scheduleComplete(path: string, side: 'src' | 'dst') {
+  function setDropdown(side: Side, completions: string[]) {
+    if (side === 'src') {
+      srcCompletions = completions;
+      srcHighlight = -1;
+      srcDropdown = completions.length > 0;
+    } else {
+      dstCompletions = completions;
+      dstHighlight = -1;
+      dstDropdown = completions.length > 0;
+    }
+  }
+
+  function closeDropdown(side: Side) {
+    if (side === 'src') { srcDropdown = false; srcHighlight = -1; }
+    else { dstDropdown = false; dstHighlight = -1; }
+  }
+
+  function scheduleComplete(path: string, side: Side) {
     clearTimeout(completeTimers[side]);
     completeTimers[side] = setTimeout(async () => {
+      let completions: string[] = [];
       try {
-        const r = await api.complete(path);
-        if (side === 'src') {
-          srcCompletions = r.completions;
-          srcHighlight = -1;
-          srcDropdown = r.completions.length > 0;
-        } else {
-          dstCompletions = r.completions;
-          dstHighlight = -1;
-          dstDropdown = r.completions.length > 0;
-        }
-      } catch {
-        if (side === 'src') { srcCompletions = []; srcDropdown = false; }
-        else { dstCompletions = []; dstDropdown = false; }
-      }
+        completions = (await api.complete(path)).completions;
+      } catch { /* treated as no completions */ }
+      // Stale answer: the input moved on (a newer request owns it), or the
+      // user left the field while this one was in flight.
+      if (path !== pathOf(side) || !inputFocused[side]) return;
+      setDropdown(side, completions);
     }, 120);
   }
 
-  // Convert slashes to the OS-native separator, but do not append a trailing one.
-  // Used while the user is actively typing.
   function convertSep(p: string): string {
-    const sep = $pathSep;
-    return sep === '\\' ? p.replace(/\//g, '\\') : p.replace(/\\/g, '/');
+    return toNativeSep(p, $pathSep);
   }
 
-  // Convert slashes AND append a trailing separator. Used on blur / confirmed picks.
   function normalizeSep(p: string): string {
-    const sep = $pathSep;
-    const out = convertSep(p);
-    return out && !out.endsWith(sep) ? out + sep : out;
+    return withTrailingSep(p, $pathSep);
   }
 
-  function onPathInput(side: 'src' | 'dst') {
-    const raw = side === 'src' ? $src : $dst;
+  function onPathInput(side: Side) {
+    const raw = pathOf(side);
     const converted = convertSep(raw);
     if (converted !== raw) {
       if (side === 'src') src.set(converted);
@@ -140,11 +160,14 @@
     scheduleComplete(converted, side);
   }
 
-  function onPathKeydown(e: KeyboardEvent, side: 'src' | 'dst') {
+  function onPathKeydown(e: KeyboardEvent, side: Side) {
     const completions = side === 'src' ? srcCompletions : dstCompletions;
-    const highlight   = side === 'src' ? srcHighlight   : dstHighlight;
+    const open = (side === 'src' ? srcDropdown : dstDropdown) && completions.length > 0;
+    // A closed dropdown owns no keys: Enter, Tab and the arrows keep their
+    // normal meaning instead of acting on a hidden highlighted entry.
+    if (!open) return;
+    const highlight = side === 'src' ? srcHighlight : dstHighlight;
     const setHL = (h: number) => { if (side === 'src') srcHighlight = h; else dstHighlight = h; };
-    const close = () => { if (side === 'src') srcDropdown = false; else dstDropdown = false; };
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -152,49 +175,48 @@
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setHL(Math.max(highlight - 1, 0));
-    } else if (e.key === 'Enter' && highlight >= 0) {
+    } else if ((e.key === 'Enter' || e.key === 'Tab') && highlight >= 0) {
+      // Tab without a highlight falls through to the browser's own tab
+      // order, which is the only keyboard route to the action row.
       e.preventDefault();
       pickCompletion(completions[highlight], side);
-    } else if (e.key === 'Tab') {
-      // Tab confirms a highlighted completion; otherwise the browser's own
-      // tab order runs, which is the only keyboard route to the action row.
-      if (highlight >= 0 && completions.length > 0) {
-        e.preventDefault();
-        pickCompletion(completions[highlight], side);
-      }
     } else if (e.key === 'Escape') {
-      close();
+      e.preventDefault();
+      closeDropdown(side);
     }
   }
 
-  function pickCompletion(path: string, side: 'src' | 'dst') {
+  function pickCompletion(path: string, side: Side) {
     path = normalizeSep(path);
+    clearTimeout(completeTimers[side]);
     if (side === 'src') {
       src.set(path);
-      srcDropdown = false;
       srcCompletions = [];
     } else {
       dst.set(path);
-      dstDropdown = false;
       dstCompletions = [];
     }
+    closeDropdown(side);
     // Re-run stat immediately for the chosen path
     scheduleStatCheck(path, side);
   }
 
-  function onPathBlur(side: 'src' | 'dst') {
+  function onPathFocus(side: Side) {
+    inputFocused[side] = true;
+  }
+
+  function onPathBlur(side: Side) {
+    inputFocused[side] = false;
+    clearTimeout(completeTimers[side]);
     // Append trailing separator now that the user has finished typing.
-    const raw = side === 'src' ? $src : $dst;
+    const raw = pathOf(side);
     const normalized = normalizeSep(raw);
     if (normalized !== raw) {
       if (side === 'src') src.set(normalized);
       else dst.set(normalized);
     }
     // Delay dropdown close so a mousedown on a completion item fires first.
-    setTimeout(() => {
-      if (side === 'src') srcDropdown = false;
-      else dstDropdown = false;
-    }, 150);
+    setTimeout(() => closeDropdown(side), 150);
   }
 
   $effect(() => { scheduleStatCheck($src, 'src'); });
@@ -206,8 +228,9 @@
   const isPaused = $derived(status === 'paused');
   // While a plan is live the endpoints are fixed: the executor works from
   // the plan's own roots and POST /run rejects a mismatching pair, so an
-  // edit here could not take effect anyway. Paused counts as locked: the
-  // run is resumable and still owns the plan.
+  // edit here could not take effect anyway. Paused counts as locked: a
+  // paused run is resumable and still owns the plan. A cancelled one is not:
+  // the server drops its plan, and the next Run needs a fresh preview.
   const pathsLocked = $derived(isBusy || isPaused);
   // Clear the "Pausing" transient label once the backend actually pauses (or stops).
   $effect(() => { if (isPaused || !isBusy) pausing = false; });
@@ -218,25 +241,28 @@
     && !running
     && !!$src.trim() && !!$dst.trim()
     && $planMeta.totalOps > 0);
-  const canPause = $derived(isBusy || isPaused);
+  // Only an executing run can pause: a preview ignores the pause flag.
+  const canPause = $derived(status === 'running' || isPaused);
   const canCancel = $derived(isBusy || isPaused);
 
-  function parentPath(p: string): string {
-    const normalized = p.replace(/[\\/]+$/, '');
-    const lastSep = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
-    if (lastSep < 0) return normalized;
-    if (lastSep <= 2 && normalized[1] === ':') return normalized.slice(0, 2) + '\\';
-    return normalized.slice(0, lastSep) || '/';
+  async function togglePause() {
+    if (pauseInFlight || pausing) return;
+    pauseInFlight = true;
+    const paused = await onpause();
+    pauseInFlight = false;
+    // Label from the server's answer: "Pausing..." until the status catches
+    // up, or nothing when it resumed (or the request failed).
+    pausing = paused === true && status !== 'paused';
   }
 
-  function normalizeBrowseResult(result: { path: string; entries: import('../lib/types').BrowseEntry[] }) {
+  function normalizeBrowseResult(result: { path: string; entries: BrowseEntry[] }) {
     browsePath = normalizeSep(result.path);
     browseEntries = result.entries.map(e => ({ ...e, path: normalizeSep(e.path) }));
   }
 
-  async function openBrowse(side: 'src' | 'dst') {
+  async function openBrowse(side: Side) {
     browsingSide = side;
-    const startPath = side === 'src' ? ($src || '') : ($dst || '');
+    const startPath = pathOf(side) || '';
     try {
       normalizeBrowseResult(await api.browse(startPath));
     } catch (err) {
@@ -260,10 +286,12 @@
     browsingSide = null;
   }
 
+  function closeBrowse() { browsingSide = null; }
+
   async function toggleDark() {
     const newDark = !$isDark;
     isDark.set(newDark);
-    const theme = (newDark ? 'dark' : 'light') as import('../lib/types').Theme;
+    const theme: Theme = newDark ? 'dark' : 'light';
     config.update(c => ({ ...c, theme }));
     menuOpen = false;
     // Persist just the theme: the server merges it and owns the rest (the
@@ -277,8 +305,6 @@
 
   function closeMenu() { menuOpen = false; }
 </script>
-
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && browsingSide) browsingSide = null; }} />
 
 <div class="topbar">
   <!-- Line 1: title + menu -->
@@ -319,6 +345,7 @@
           autocomplete="off"
           oninput={() => onPathInput('src')}
           onkeydown={(e) => onPathKeydown(e, 'src')}
+          onfocus={() => onPathFocus('src')}
           onblur={() => onPathBlur('src')}
         />
         {#if srcDropdown}
@@ -350,6 +377,7 @@
           autocomplete="off"
           oninput={() => onPathInput('dst')}
           onkeydown={(e) => onPathKeydown(e, 'dst')}
+          onfocus={() => onPathFocus('dst')}
           onblur={() => onPathBlur('dst')}
         />
         {#if dstDropdown}
@@ -379,7 +407,7 @@
     <button type="button" class="action-btn success" disabled={!canRun} onclick={onrun}>
       {#if isRunning && status !== 'running'}<span class="btn-spinner">⟳</span> Running…{:else}Run{/if}
     </button>
-    <button type="button" class="action-btn warn" disabled={!canPause} onclick={() => { if (!isPaused) pausing = true; onpause(); }}>
+    <button type="button" class="action-btn warn" disabled={!canPause || pauseInFlight || pausing} onclick={togglePause}>
       {isPaused ? 'Resume' : pausing ? 'Pausing…' : 'Pause'}
     </button>
     <button type="button"class="action-btn danger" disabled={!canCancel} onclick={oncancel}>
@@ -394,17 +422,31 @@
 
 <!-- Browse dialog -->
 {#if browsingSide}
-  <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) browsingSide = null; }}>
-    <div class="browse-dialog">
+  <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeBrowse(); }}>
+    <div
+      class="browse-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="browse-title"
+      tabindex="-1"
+      use:trapFocus={{ onclose: closeBrowse }}
+    >
       <div class="browse-header">
-        <span class="browse-title">Select {browsingSide.toUpperCase()} directory</span>
-        <button type="button"class="close-btn" onclick={() => browsingSide = null}>✕</button>
+        <span class="browse-title" id="browse-title">Select {browsingSide.toUpperCase()} directory</span>
+        <button type="button" class="close-btn" aria-label="Close" onclick={closeBrowse}>✕</button>
       </div>
       <div class="browse-path-bar">
-        <input class="browse-path-input" bind:value={browsePath} onchange={() => navigateBrowse(browsePath)} />
+        <input
+          class="browse-path-input"
+          aria-label="Directory path"
+          data-autofocus
+          bind:value={browsePath}
+          onchange={() => navigateBrowse(browsePath)}
+        />
       </div>
       <div class="browse-list">
-        {#if browsePath}
+        <!-- No ".." at a root: there is nothing above it to list. -->
+        {#if browsePath && !isRootPath(browsePath)}
           <button type="button" class="browse-entry dir" onclick={() => navigateBrowse(parentPath(browsePath))}>
             <span class="entry-icon">📁</span>..
           </button>
@@ -425,7 +467,7 @@
         <button type="button"class="action-btn primary" onclick={() => selectBrowseDir(browsePath)}>
           Select "{browsePath.split(/[\\/]/).pop() || browsePath}"
         </button>
-        <button type="button"class="action-btn" onclick={() => browsingSide = null}>Cancel</button>
+        <button type="button" class="action-btn" onclick={closeBrowse}>Cancel</button>
       </div>
     </div>
   </div>
@@ -632,6 +674,7 @@
     z-index: 100;
   }
   .browse-dialog {
+    outline: none;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;

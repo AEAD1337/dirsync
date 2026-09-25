@@ -37,6 +37,11 @@ pub struct AppConfig {
     /// file or the wire format: `--config` chooses it, nothing else may.
     #[serde(skip)]
     pub path: Option<PathBuf>,
+    /// Patterns added for this session only (`-e`). They take part in every
+    /// walk but `save` strips them: a one-off flag must not become a
+    /// permanent part of the file.
+    #[serde(skip)]
+    pub session_excludes: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -48,12 +53,45 @@ impl Default for AppConfig {
             last_dst: None,
             theme: Theme::default(),
             path: None,
+            session_excludes: Vec::new(),
         }
     }
 }
 
+/// Decode config bytes: UTF-8 (with or without BOM) or UTF-16 with a BOM,
+/// which is what Windows PowerShell 5.1's `>` and `Out-File` write.
+fn decode(bytes: &[u8]) -> Option<String> {
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+        let units: Vec<u16> = rest
+            .chunks(2)
+            .map(|c| unit([c[0], *c.get(1).unwrap_or(&0)]))
+            .collect();
+        String::from_utf16(&units).ok()
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        String::from_utf8(rest.to_vec()).ok()
+    } else if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        utf16(rest, u16::from_le_bytes)
+    } else if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        utf16(rest, u16::from_be_bytes)
+    } else {
+        String::from_utf8(bytes.to_vec()).ok()
+    }
+}
+
+fn parse(bytes: &[u8]) -> std::result::Result<AppConfig, String> {
+    let text = decode(bytes).ok_or("not valid UTF-8 or UTF-16 text")?;
+    toml::from_str(&text).map_err(|e| e.to_string())
+}
+
 impl AppConfig {
+    /// `DIRSYNC_CONFIG` names the file outright (portable installs, and test
+    /// isolation from the developer's own config); otherwise the platform
+    /// config directory.
     pub fn config_path() -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os("DIRSYNC_CONFIG").filter(|p| !p.is_empty()) {
+            return Some(PathBuf::from(p));
+        }
         dirs::config_dir().map(|d| d.join("dirsync").join("config.toml"))
     }
 
@@ -64,16 +102,27 @@ impl AppConfig {
         Self::load_from(&path)
     }
 
+    /// Load a file the user named (`--config`). Unlike `load_from`, every
+    /// failure is an error: silently substituting defaults would drop the
+    /// job's excludes, and the DST content they protect would be deleted.
+    pub fn load_explicit(path: &std::path::Path) -> Result<Self> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("cannot read config '{}'", path.display()))?;
+        let cfg = parse(&bytes)
+            .map_err(|e| anyhow::anyhow!("cannot parse config '{}': {e}", path.display()))?;
+        Ok(cfg.loaded_from(path))
+    }
+
+    /// Load the default config file, falling back to defaults when it is
+    /// missing or broken. A broken file is backed up byte for byte first:
+    /// the GUI saves once per preview and would otherwise overwrite it.
     pub fn load_from(path: &std::path::Path) -> Self {
-        let mut cfg: Self = match std::fs::read_to_string(path) {
-            Ok(contents) => match toml::from_str(&contents) {
+        let cfg = match std::fs::read(path) {
+            Ok(bytes) => match parse(&bytes) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    // Falling back silently was destructive: the next save()
-                    // (the GUI does one per preview) overwrote the user's file
-                    // with defaults. Keep the original next to it and say so.
                     let backup = path.with_extension("toml.bad");
-                    let _ = std::fs::write(&backup, &contents);
+                    let _ = std::fs::write(&backup, &bytes);
                     eprintln!(
                         "Warning: could not parse '{}' ({e}); using defaults. The original was saved as '{}'.",
                         path.display(),
@@ -82,16 +131,27 @@ impl AppConfig {
                     Self::default()
                 }
             },
-            Err(_) => Self::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not read '{}' ({e}); using defaults.",
+                    path.display()
+                );
+                Self::default()
+            }
         };
+        cfg.loaded_from(path)
+    }
+
+    fn loaded_from(mut self, path: &std::path::Path) -> Self {
         // A hand-edited port outside the valid range would bind an ephemeral
         // or privileged port that the printed URL and Host allowlist don't
         // match: fall back to the default like any other invalid config.
-        if validate_port(cfg.port).is_err() {
-            cfg.port = Self::default().port;
+        if validate_port(self.port).is_err() {
+            self.port = Self::default().port;
         }
-        cfg.path = Some(path.to_path_buf());
-        cfg
+        self.path = Some(path.to_path_buf());
+        self
     }
 
     /// Write back to the path this config was loaded from, or the platform
@@ -108,17 +168,31 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("toml.tmp");
-        let contents = toml::to_string_pretty(self)?;
+        // One staging name per save: concurrent writers (PUT /config and a
+        // preview) sharing a name made the losing rename fail on Windows.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("toml.{}.{seq}.tmp", std::process::id()));
+        let mut persisted = self.clone();
+        persisted
+            .exclude_patterns
+            .retain(|p| !self.session_excludes.contains(p));
+        let contents = toml::to_string_pretty(&persisted)?;
         std::fs::write(&tmp, contents)?;
-        std::fs::rename(&tmp, path)?;
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 
+    /// Add session-only patterns: applied to every walk, never saved.
+    /// Patterns the file already has stay file-backed.
     pub fn with_extra_excludes(mut self, extras: Vec<String>) -> Self {
         for e in extras {
             if !self.exclude_patterns.contains(&e) {
-                self.exclude_patterns.push(e);
+                self.exclude_patterns.push(e.clone());
+                self.session_excludes.push(e);
             }
         }
         self
@@ -141,7 +215,7 @@ mod tests {
             last_src: None,
             last_dst: None,
             theme: Theme::Dark,
-            path: None,
+            ..Default::default()
         };
         cfg.save_to(&path).unwrap();
 
@@ -157,13 +231,12 @@ mod tests {
     fn test_save_to_atomic_leaves_no_tmp_file() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let tmp = dir.path().join("config.toml.tmp");
-
         AppConfig::default().save_to(&path).unwrap();
 
         assert!(path.exists());
-        assert!(
-            !tmp.exists(),
+        let entries = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(
+            entries, 1,
             ".tmp file should not remain after atomic rename"
         );
     }
@@ -179,7 +252,7 @@ mod tests {
             last_src: Some(PathBuf::from("/src")),
             last_dst: Some(PathBuf::from("/dst")),
             theme: Theme::System,
-            path: None,
+            ..Default::default()
         };
         original.save_to(&path).unwrap();
 

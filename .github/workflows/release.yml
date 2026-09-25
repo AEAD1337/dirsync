@@ -41,26 +41,46 @@ env:
   CYCLONEDX_NPM_VERSION: "6.0.1"
 
 jobs:
+  # Concurrency is set per job rather than for the whole workflow. Each build
+  # job cancels the same job of an older run on the same ref, so an older
+  # push stops spending minutes on binaries that would never be published.
+  # The release job has one group across all refs (workflow_dispatch can run
+  # from any branch), so only the newest run publishes `rolling`: a slower
+  # older run can no longer delete it and republish older binaries. Putting
+  # this at the workflow level instead would also cancel an older release
+  # job halfway between `gh release delete` and `gh release create`, leaving
+  # no rolling release until the newer run's builds finished.
   build-windows:
-    # The compile checks (Build, Build CLI-only) run on every PR so a
+    # Test and the compile checks (Build, Build CLI-only) run on every PR so a
     # Windows-only #[cfg(windows)] regression cannot hide behind a
-    # Linux-only PR pipeline. SBOM generation, staging, and the artifact
-    # upload are release concerns and stay push/dispatch-only below.
+    # Linux-only PR pipeline. Staging and the artifact upload are release
+    # concerns and stay push/dispatch-only below.
     runs-on: windows-latest
     # Least privilege: these jobs only read the repository and upload
     # artifacts. Only the release job below needs contents: write.
     permissions:
       contents: read
+    concurrency:
+      group: ${{ github.workflow }}-build-windows-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - name: Install frontend deps
         run: npm ci
         working-directory: frontend
+      # The Windows-only code (case-only renames, drive detection,
+      # normalize_path) is only exercised here: the Linux job cannot run it.
+      # A debug build, not --release, so it does not rebuild with LTO; clippy
+      # and fmt are platform-independent and stay in the Linux job.
+      - name: Test
+        run: cargo test --locked --all-features
       - name: Build
-        run: cargo build --release --features gui
+        run: cargo build --locked --release --features gui
       # Staged before the CLI-only build below, which reuses the same
       # target/release/dirsync.exe path and would otherwise overwrite it.
       - name: Stage GUI binary
@@ -69,43 +89,10 @@ jobs:
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item target/release/dirsync.exe dist/
       - name: Build CLI-only
-        run: cargo build --release --no-default-features
+        run: cargo build --locked --release --no-default-features
       - name: Stage CLI-only binary
         if: github.event_name != 'pull_request'
         run: Copy-Item target/release/dirsync.exe dist/dirsync-cli.exe
-      - name: Install cargo-cyclonedx
-        if: github.event_name != 'pull_request'
-        run: irm https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.ps1 | iex
-      # Runtime dependency graph for the shipped Windows binary. cargo-cyclonedx
-      # resolves via `cargo metadata`, so dev-dependencies are excluded by
-      # construction and `--no-build-deps` drops build-dependencies too.
-      - name: Generate SBOM
-        if: github.event_name != 'pull_request'
-        run: >
-          cargo cyclonedx
-          --format json
-          --spec-version 1.5
-          --features gui
-          --target x86_64-pc-windows-msvc
-          --no-build-deps
-          --override-filename sbom-x86_64-pc-windows-msvc
-      # The CLI-only binary links 52 fewer crates (no axum, rust-embed,
-      # mime_guess or open), so the GUI SBOM would overstate it.
-      - name: Generate CLI-only SBOM
-        if: github.event_name != 'pull_request'
-        run: >
-          cargo cyclonedx
-          --format json
-          --spec-version 1.5
-          --no-default-features
-          --target x86_64-pc-windows-msvc
-          --no-build-deps
-          --override-filename sbom-cli-x86_64-pc-windows-msvc
-      - name: Stage SBOMs
-        if: github.event_name != 'pull_request'
-        run: |
-          Copy-Item sbom-x86_64-pc-windows-msvc.json dist/
-          Copy-Item sbom-cli-x86_64-pc-windows-msvc.json dist/
       - uses: actions/upload-artifact@v7
         if: github.event_name != 'pull_request'
         with:
@@ -119,17 +106,22 @@ jobs:
     # artifacts. Only the release job below needs contents: write.
     permissions:
       contents: read
+    concurrency:
+      group: ${{ github.workflow }}-build-linux-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - name: Format check
         run: cargo fmt -- --check
       - name: Test
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       # build.rs already ran npm ci and the Vite build during Test/Clippy
       # above (cargo invokes it whenever the gui feature is active, and
       # --all-features enables it), so node_modules and the generated
@@ -152,7 +144,7 @@ jobs:
         run: rustup target add x86_64-unknown-linux-musl
       - name: Build
         if: github.event_name != 'pull_request'
-        run: cargo build --release --features gui --target x86_64-unknown-linux-musl
+        run: cargo build --locked --release --features gui --target x86_64-unknown-linux-musl
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       # Staged before the CLI-only build below, which reuses the same
@@ -164,18 +156,73 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/dirsync dist/
       - name: Build CLI-only
         if: github.event_name != 'pull_request'
-        run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+        run: cargo build --locked --release --no-default-features --target x86_64-unknown-linux-musl
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       - name: Stage CLI-only binary
         if: github.event_name != 'pull_request'
         run: cp target/x86_64-unknown-linux-musl/release/dirsync dist/dirsync-cli
-      - name: Install cargo-cyclonedx
+      - uses: actions/upload-artifact@v7
         if: github.event_name != 'pull_request'
-        run: curl --proto '=https' --tlsv1.3 -LsSf https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${{ env.CARGO_CYCLONEDX_VERSION }}/cargo-cyclonedx-installer.sh | sh
-      # Runtime dependency graph for the shipped Linux/musl binary.
-      - name: Generate Rust SBOM
-        if: github.event_name != 'pull_request'
+        with:
+          name: linux
+          path: dist/
+          retention-days: 7
+
+  # The SBOM generators are third-party code fetched at run time, so they run
+  # in a job of their own that never has a release binary in its workspace:
+  # nothing they execute can touch what gets published. All four Rust SBOMs
+  # come from `cargo metadata --filter-platform`, which needs neither the
+  # target's toolchain nor a build, so one Linux runner covers both targets.
+  sbom:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}-sbom-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      # Third-party action pinned to a full commit SHA: a tag can be moved to
+      # point at different code, a commit SHA cannot. v2.87.5. It downloads
+      # the prebuilt release and checks it against the SHA-256 recorded in
+      # the action's manifest; `fallback: none` makes a missing manifest
+      # entry fail the job instead of silently installing an unverified build.
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8
+        with:
+          tool: cargo-cyclonedx@${{ env.CARGO_CYCLONEDX_VERSION }}
+          fallback: none
+      # Runtime dependency graphs for the shipped binaries. cargo-cyclonedx
+      # resolves via `cargo metadata`, so dev-dependencies are excluded by
+      # construction and `--no-build-deps` drops build-dependencies too.
+      - name: Generate Windows SBOM
+        run: >
+          cargo cyclonedx
+          --format json
+          --spec-version 1.5
+          --features gui
+          --target x86_64-pc-windows-msvc
+          --no-build-deps
+          --override-filename sbom-x86_64-pc-windows-msvc
+      # The CLI-only binary links 52 fewer crates (no axum, rust-embed,
+      # mime_guess or open) and embeds no frontend, so neither the GUI
+      # SBOM nor sbom-frontend.json describes it.
+      - name: Generate Windows CLI-only SBOM
+        run: >
+          cargo cyclonedx
+          --format json
+          --spec-version 1.5
+          --no-default-features
+          --target x86_64-pc-windows-msvc
+          --no-build-deps
+          --override-filename sbom-cli-x86_64-pc-windows-msvc
+      - name: Generate Linux SBOM
         run: >
           cargo cyclonedx
           --format json
@@ -184,23 +231,7 @@ jobs:
           --target x86_64-unknown-linux-musl
           --no-build-deps
           --override-filename sbom-x86_64-unknown-linux-musl
-      # The frontend declares everything as devDependencies, but Vite compiles
-      # the Svelte runtime into the bundle that rust-embed ships inside the
-      # binary: so these are recorded rather than omitted.
-      - name: Generate frontend SBOM
-        if: github.event_name != 'pull_request'
-        working-directory: frontend
-        run: >
-          npx --yes @cyclonedx/cyclonedx-npm@${{ env.CYCLONEDX_NPM_VERSION }}
-          --spec-version 1.6
-          --output-format JSON
-          --output-reproducible
-          --output-file ../sbom-frontend.json
-      # The CLI-only binary links 52 fewer crates (no axum, rust-embed,
-      # mime_guess or open) and embeds no frontend, so neither the GUI
-      # SBOM nor sbom-frontend.json describes it.
-      - name: Generate CLI-only SBOM
-        if: github.event_name != 'pull_request'
+      - name: Generate Linux CLI-only SBOM
         run: >
           cargo cyclonedx
           --format json
@@ -209,30 +240,54 @@ jobs:
           --target x86_64-unknown-linux-musl
           --no-build-deps
           --override-filename sbom-cli-x86_64-unknown-linux-musl
+      # cyclonedx-npm reads the installed tree. --ignore-scripts: nothing in
+      # this job needs a package's install script to run.
+      - name: Install frontend deps
+        run: npm ci --ignore-scripts
+        working-directory: frontend
+      # The frontend declares everything as devDependencies, but Vite compiles
+      # the Svelte runtime into the bundle that rust-embed ships inside the
+      # binary: so these are recorded rather than omitted. npx pins the
+      # generator's own version but resolves its dependencies at run time,
+      # which is why this runs here and not next to the binaries.
+      - name: Generate frontend SBOM
+        working-directory: frontend
+        run: >
+          npx --yes @cyclonedx/cyclonedx-npm@${{ env.CYCLONEDX_NPM_VERSION }}
+          --spec-version 1.6
+          --output-format JSON
+          --output-reproducible
+          --output-file ../sbom-frontend.json
       - name: Stage SBOMs
-        if: github.event_name != 'pull_request'
         run: |
-          cp sbom-x86_64-unknown-linux-musl.json sbom-frontend.json dist/
-          cp sbom-cli-x86_64-unknown-linux-musl.json dist/
+          mkdir -p sbom
+          mv sbom-x86_64-pc-windows-msvc.json sbom-cli-x86_64-pc-windows-msvc.json sbom/
+          mv sbom-x86_64-unknown-linux-musl.json sbom-cli-x86_64-unknown-linux-musl.json sbom/
+          mv sbom-frontend.json sbom/
       - uses: actions/upload-artifact@v7
-        if: github.event_name != 'pull_request'
         with:
-          name: linux
-          path: dist/
+          name: sbom
+          path: sbom/
           retention-days: 7
 
   release:
-    needs: [build-windows, test-and-build-linux]
-    # build-windows and test-and-build-linux both now run their compile
-    # checks on pull requests too, so their success no longer implies a
-    # push/dispatch event: without this, a PR run would satisfy `needs` and
-    # this job would try to overwrite the rolling release before merge.
+    needs: [build-windows, test-and-build-linux, sbom]
+    # build-windows and test-and-build-linux both run their compile checks
+    # on pull requests too, so their success does not imply a push/dispatch
+    # event: without this, a PR run would satisfy `needs` and this job would
+    # try to overwrite the rolling release before merge.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # One group for every ref: see the note at the top of `jobs`.
+    concurrency:
+      group: ${{ github.workflow }}-rolling-release
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           name: windows
@@ -240,6 +295,10 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: linux
+          path: artifacts/
+      - uses: actions/download-artifact@v8
+        with:
+          name: sbom
           path: artifacts/
       - name: Publish rolling release
         # Third-party action pinned to a full commit SHA: a tag can be moved

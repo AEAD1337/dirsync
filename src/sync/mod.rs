@@ -43,6 +43,24 @@ impl CancelToken {
     }
 }
 
+/// Drop every DST entry at or below a SRC path the walk failed to read.
+fn shield_unreadable(
+    dst_entries: Vec<walker::FileEntry>,
+    src_errors: &[walker::WalkError],
+) -> Vec<walker::FileEntry> {
+    if src_errors.is_empty() {
+        return dst_entries;
+    }
+    dst_entries
+        .into_iter()
+        .filter(|d| {
+            !src_errors
+                .iter()
+                .any(|e| d.rel_path.starts_with(&e.rel_path))
+        })
+        .collect()
+}
+
 pub struct SyncEngine {
     pub src: PathBuf,
     pub dst: PathBuf,
@@ -76,6 +94,21 @@ impl SyncEngine {
         progress: Option<Arc<ProgressState>>,
         cancel_rx: Option<watch::Receiver<bool>>,
     ) -> Result<planner::SyncPlan> {
+        let mut out = None;
+        self.preview_with(progress, cancel_rx, |plan| out = Some(plan))
+            .await?;
+        out.ok_or_else(|| anyhow::anyhow!("preview produced no plan"))
+    }
+
+    /// `preview`, handing the plan to `deliver` *before* the Previewing
+    /// status is released, so a caller that publishes it (the GUI stores it
+    /// and emits PlanReady) is done before any observer sees Idle.
+    pub async fn preview_with(
+        &self,
+        progress: Option<Arc<ProgressState>>,
+        cancel_rx: Option<watch::Receiver<bool>>,
+        deliver: impl FnOnce(planner::SyncPlan),
+    ) -> Result<()> {
         let cancel = CancelToken::new(cancel_rx);
         let cancelled = || cancel.is_cancelled();
         // Restore Idle via compare-and-set: only release a status this preview
@@ -103,7 +136,7 @@ impl SyncEngine {
             });
         }
 
-        let excludes = walker::build_excludes(&self.config.exclude_patterns)?;
+        let excludes = walker::build_excludes(&self.config.exclude_patterns);
         let src = self.src.clone();
         let dst = self.dst.clone();
         let dst_root = self.dst.clone();
@@ -118,7 +151,11 @@ impl SyncEngine {
         let drives = match self.drives {
             Some(explicit) => explicit,
             None => {
-                let (profile, drive_msg) = crate::drive::probe(&self.src, &self.dst);
+                // Probing stats both endpoints: off the async workers, which
+                // a dead network share would otherwise stall.
+                let (src, dst) = (self.src.clone(), self.dst.clone());
+                let (profile, drive_msg) =
+                    tokio::task::spawn_blocking(move || crate::drive::probe(&src, &dst)).await?;
                 if let Some(p) = &progress {
                     p.emit_log(crate::progress::LogLevel::Info, drive_msg);
                     p.emit(ProgressEvent::DriveMode {
@@ -147,7 +184,7 @@ impl SyncEngine {
                     if dst.exists() {
                         walker::walk(&dst, &ex2, "dst", prog_dst, &cancel_dst)
                     } else {
-                        Ok(vec![])
+                        Ok(walker::Walk::default())
                     }
                 }
             })
@@ -160,8 +197,23 @@ impl SyncEngine {
             return Err(anyhow::anyhow!("cancelled"));
         }
 
-        let src_entries = src_result??;
-        let dst_entries = dst_result??;
+        let src_walk = src_result??;
+        let dst_walk = dst_result??;
+        let src_entries = src_walk.entries;
+        // A DST entry at or below a SRC path the walk could not read may well
+        // still exist in SRC: leave it out of matching entirely, so it is
+        // neither deleted as an orphan nor claimed as a move source.
+        let dst_entries = shield_unreadable(dst_walk.entries, &src_walk.errors);
+        let walk_errors: Vec<crate::error::FileError> = src_walk
+            .errors
+            .iter()
+            .map(|e| (&self.src, e))
+            .chain(dst_walk.errors.iter().map(|e| (&self.dst, e)))
+            .map(|(root, e)| crate::error::FileError {
+                path: root.join(&e.rel_path),
+                message: e.message.clone(),
+            })
+            .collect();
 
         if let Some(p) = &progress {
             let src_files = src_entries.iter().filter(|e| !e.is_dir).count();
@@ -182,9 +234,6 @@ impl SyncEngine {
             return Err(anyhow::anyhow!("cancelled"));
         }
 
-        let src_dirs: Vec<_> = src_entries.iter().filter(|e| e.is_dir).cloned().collect();
-        let dst_dirs: Vec<_> = dst_entries.iter().filter(|e| e.is_dir).cloned().collect();
-
         // Announce fingerprinting phase before the blocking matcher work so
         // the CLI/GUI transitions away from "Walking" even during the CPU-only
         // classification phase (rename-dir detection, size-index building)
@@ -201,14 +250,17 @@ impl SyncEngine {
         // to service the scan() progress display task throughout.
         let prog_for_match = progress.clone();
         let cancel_match = cancel.clone();
+        // The entries travel into the blocking task and back, so the
+        // planner's directory lists are moved out of them rather than cloned.
         let match_output = tokio::task::spawn_blocking(move || {
-            matcher::match_trees(
+            let out = matcher::match_trees(
                 &src_entries,
                 &dst_entries,
                 prog_for_match,
                 drives,
                 &cancel_match,
-            )
+            );
+            (out, src_entries, dst_entries)
         })
         .await;
         // Same contract as the walks: a cancelled match returns Err instead of
@@ -217,7 +269,10 @@ impl SyncEngine {
             release_previewing(&progress);
             return Err(anyhow::anyhow!("cancelled"));
         }
-        let match_output = match_output??;
+        let (match_output, src_entries, dst_entries) = match_output?;
+        let match_output = match_output?;
+        let src_dirs: Vec<_> = src_entries.into_iter().filter(|e| e.is_dir).collect();
+        let dst_dirs: Vec<_> = dst_entries.into_iter().filter(|e| e.is_dir).collect();
 
         if let Some(p) = &progress {
             p.emit(ProgressEvent::ScanProgress {
@@ -227,7 +282,7 @@ impl SyncEngine {
         }
 
         let src_root = self.src.clone();
-        let plan = planner::plan(
+        let mut plan = planner::plan(
             match_output,
             &src_dirs,
             &dst_dirs,
@@ -235,13 +290,12 @@ impl SyncEngine {
             &dst_root,
             drives.serial_copies(),
         );
+        plan.walk_errors = walk_errors;
 
-        // Do NOT emit PlanReady here: the GUI handler stores the plan
-        // in last_plan first and then emits PlanReady so the WS handler
-        // can read it without a race. The CLI path doesn't need PlanReady.
+        deliver(plan);
         release_previewing(&progress);
 
-        Ok(plan)
+        Ok(())
     }
 
     pub async fn run(
@@ -254,7 +308,8 @@ impl SyncEngine {
     ) -> SkipLog {
         // Ensure DST root exists
         if !dry_run {
-            let _ = std::fs::create_dir_all(&self.dst);
+            let dst = self.dst.clone();
+            let _ = tokio::task::spawn_blocking(move || std::fs::create_dir_all(dst)).await;
         }
         // The plan carries the drive mode its preview resolved: using it here
         // keeps run consistent with preview regardless of engine construction.

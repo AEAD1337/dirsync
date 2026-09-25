@@ -25,7 +25,7 @@ export type SyncStatus =
   | 'done'
   | 'cancelled';
 
-export type Badge = '+' | '–' | '→' | '↻' | '⇢' | '~' | '!';
+export type Badge = '+' | '–' | '→' | '↻' | '⇢' | '~';
 
 export type LogLevel = 'info' | 'warning' | 'error';
 
@@ -88,7 +88,11 @@ export type ScanProgressPhase =
 export type WsEvent =
   | ({ type: 'progress_update' } & ProgressSnapshot)
   | { type: 'status_changed'; status: SyncStatus }
+  // A failed op. `path` is DST-relative with forward slashes: the same shape
+  // as OpEntry.rel_path and the ops_completed paths, so it keys a row directly.
   | { type: 'error_occurred'; path: string; message: string }
+  // The preview itself failed (bad path, walk error): no plan follows.
+  | { type: 'preview_failed'; message: string }
   | { type: 'ops_completed'; rel_paths: string[] }
   | { type: 'scan_update'; side: 'src' | 'dst'; file_count: number }
   | { type: 'scan_progress'; phase: ScanProgressPhase; path: string | null }

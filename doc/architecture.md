@@ -7,7 +7,7 @@ dirsync is a one-way directory mirror. All sync logic lives in `src/sync/`; the 
 ```
 Walk (parallel)
   └─ src/sync/walker.rs
-        │  Vec<FileEntry> (rel_path, abs_path, size, mtime, is_dir)
+        │  Walk { entries: Vec<FileEntry>, errors: Vec<WalkError> }
         ▼
 Match
   └─ src/sync/matcher.rs
@@ -48,6 +48,8 @@ Both trees are walked concurrently: the engine drives them with `tokio::join!` o
 - `is_dir`: separates file and directory entries
 - `symlink_target`: `Option<PathBuf>`; `Some(target)` for symlinks (raw target, not resolved), `None` for regular files and dirs
 
+**Unreadable paths** are returned next to the entries (`Walk::errors`, relative paths plus messages) instead of being skipped silently. An unreadable *root* is an error: the walk fails rather than reporting an empty tree. After both walks the engine drops every DST entry at or below an unreadable SRC path before matching (`shield_unreadable` in `mod.rs`), so nothing there is deleted or claimed as a move source, and stores all walk errors on the plan (`SyncPlan::walk_errors`) for the CLI to report and fail its exit status on.
+
 **Exclusions** are applied per path component. A pattern matching any single component anywhere in the relative path excludes the entire subtree. Built-in exclusions (`System Volume Information`, `$Recycle.Bin`, etc.) are prepended before user patterns.
 
 ---
@@ -60,9 +62,11 @@ Produces a `MatchResult` for every SRC file, plus an orphan list for DST files w
 
 A directory is considered renamed when it appears in SRC under a new path but its contents (modelled as `sorted[(path_within_dir, size)]`) match a DST directory's contents exactly. This fingerprint is computed purely from walk metadata: no I/O, no hashing.
 
-Detection processes SRC dirs shallowest-first so parent renames are claimed before child dirs. Once a dir pair is matched, its files are excluded from file-level move detection because the dir-level `Move` op handles them wholesale.
+Detection processes SRC dirs shallowest-first so parent renames are claimed before child dirs. Once a dir pair is matched, its files are excluded from file-level move detection because the dir-level `Move` op handles them wholesale. DST candidates are indexed by a 64-bit digest of their fingerprint and confirmed against the real fingerprint on a hit, so memory stays linear in the file count.
 
-A `rename_index` maps each known `dst_rel` to its rename record, enabling O(path-depth) effective-path lookups for files inside renamed dirs.
+A `rename_index` maps each known `dst_rel` to its rename record, enabling O(path-depth) effective-path lookups for files inside renamed dirs (`deepest_rename`, shared with the planner; renames can nest, and the deepest one applies).
+
+Before classification the matcher probes whether DST resolves names ignoring case (`dst_is_case_insensitive`: an existing DST name with its letter case flipped must resolve to the same file). The result is carried on `MatchOutput::case_insensitive` for the planner.
 
 ### Phase 1: Classify without I/O
 
@@ -71,15 +75,18 @@ Each SRC file is looked up in `dst_by_path` (keyed by effective DST path). Three
 | Situation | What gets hashed |
 |---|---|
 | Same path, same size, mtimes within 3 s | Nothing - fast-path Identical |
+| Same path only through a detected dir rename, same size | Both SRC and DST files (the rename pairing trusted sizes alone) |
 | Same path, same size, mtimes diverge | Both SRC and DST files |
 | Same path, different size | SRC only (will be Overwrite; hash stored for GUI display) |
-| No same-path DST file; **Windows only:** case-insensitive path match exists, same size, mtimes diverge | Both SRC and DST files (case-rename with mtime drift) |
-| No same-path DST file; **Windows only:** case-insensitive path match exists, different size | SRC only |
+| No same-path DST file; case-insensitive DST and a path match ignoring case, same size, mtimes diverge | Both SRC and DST files (case-rename with mtime drift) |
+| No same-path DST file; case-insensitive DST and a path match ignoring case, different size | SRC only |
 | No same-path DST file, size > 0, same-size DST candidates exist | SRC + all same-size DST candidates |
 | No same-path DST file, size > 0, no same-size DST candidates | Nothing |
 | No same-path DST file, size == 0 | Nothing - zero-byte files are excluded from move detection |
 
-On Windows a secondary `dst_by_path_lower` index (keyed by lowercased effective path) is built alongside `dst_by_path`. When a SRC file has no exact-case DST counterpart but the lowercased lookup finds one, the Windows branch handles hashing and skips the move-detection path.
+Move candidates exclude DST files that the executor clears before the move phase: one sitting where SRC has a directory, or below a path where SRC has a file or symlink. They become plain orphans instead (see decisions.md, "Executor phase ordering").
+
+On a case-insensitive DST a secondary `dst_by_path_lower` index (keyed by lowercased effective path) is built alongside `dst_by_path`. When a SRC file has no exact-case DST counterpart but the lowercased lookup finds one, that branch handles hashing and skips the move-detection path.
 
 ### Phase 2: Hash
 
@@ -87,7 +94,7 @@ On Windows a secondary `dst_by_path_lower` index (keyed by lowercased effective 
 
 ### Phase 3: Finalize matches
 
-A pre-pass marks every DST path that has a same-path SRC counterpart as reserved, preventing those files from being claimed as move sources by other SRC files processed earlier in the loop. On Windows the pre-pass also reserves DST paths that differ only in case, so case-mismatched files are not double-claimed as move sources.
+A pre-pass marks every DST path that has a same-path SRC counterpart as reserved, preventing those files from being claimed as move sources by other SRC files processed earlier in the loop. On a case-insensitive DST the pre-pass also reserves DST paths that differ only in case, so case-mismatched files are not double-claimed as move sources.
 
 Match results:
 
@@ -99,7 +106,7 @@ Match results:
 | `MovedFrom(old_path)` | No same-path DST file, but a same-hash same-size DST file exists elsewhere |
 | `NewInSrc` | No match anywhere in DST |
 
-`MatchedEntry` carries an optional `case_renamed_from: Option<PathBuf>` field. On Windows, when a SRC file matches a DST file via the case-insensitive index (and there is no exact-case match), `case_renamed_from` is set to the DST file's current rel-path. The planner uses this to emit a `CaseRename` op instead of a `Copy`.
+`MatchedEntry` carries an optional `case_renamed_from: Option<PathBuf>` field. On a case-insensitive DST, when a SRC file matches a DST file via the case-insensitive index (and there is no exact-case match), `case_renamed_from` is set to the DST file's current rel-path. The planner uses this to emit a `CaseRename` op instead of a `Copy`. `touch_after_move` marks a `MovedFrom` whose DST mtime is outside the tolerance, so the planner adds a `TouchMtime` to the same plan.
 
 ---
 
@@ -111,18 +118,17 @@ Translates `MatchOutput` into a concrete, ordered `Vec<SyncOp>`:
 pub enum SyncOp {
     MkDir      { path }
     Move       { from, to, is_dir }
-    #[cfg(windows)]
-    CaseRename { from, to, is_dir }   // case-only rename on NTFS (two-step via temp)
+    CaseRename { from, to, is_dir }   // case-only rename on a case-insensitive DST (two-step via temp)
     Copy       { src, dst, size, hash }
     Overwrite  { src, dst, size, hash }
-    Symlink    { target, dst }
+    Symlink    { target, dst, kind }  // kind: File | Dir | Junction (Windows needs to know)
     TouchMtime { src, dst }
     Delete     { path, size }
     RmDir      { path }
 }
 ```
 
-The ordering within the op list mirrors execution phase order (see Stage 4). `RmDir` ops are sorted deepest-first so each `remove_dir` call finds an already-empty directory.
+The executor partitions the op list into its phases itself (see Stage 4); within a kind, planner order is kept. `RmDir` ops are sorted deepest-first so each `remove_dir` call finds an already-empty directory. Orphan Deletes whose path is also a write target are suppressed (`occupied_dsts`; compared ignoring case on a case-insensitive DST, where `photo.jpg` and `Photo.jpg` are one file).
 
 Counters (`copy_count`, `overwrite_count`, `move_count`, `delete_count`, `identical_count`, `touch_count`, `symlink_count`) and `total_bytes` are accumulated here and exposed in `SyncPlan` for the GUI and CLI summary.
 
@@ -136,20 +142,23 @@ This ensures all operation types advance the overall progress bar, not just file
 
 ## Stage 4: Execute (`executor.rs`)
 
-Ops are partitioned by type and executed in fixed phase order:
+A safety gate at the start of `execute()` verifies that every path an op writes or removes, a rename's source included, is inside `dst_root` and contains no `..` component, before any op runs.
 
-1. **MkDir**: serial; must precede all writes. `create_dir_all` is used, so missing parent dirs are never a problem. If a plain file occupies the target path (type conflict - SRC has a dir, DST has a file), the file is removed first.
-2. **Move (dirs)**: serial, before file moves. A pre-pass deletes any DST files whose path would collide with a dir-move target (ENOTDIR/ERROR_ALREADY_EXISTS protection).
-3. **Move (files)**: topologically sorted. If move A would overwrite move B's source, B runs first. Cycles (e.g. a ↔ b swap) are broken by renaming one participant to a temp name (`.<name>.__dirsync_swap_N__`) before continuing.
-4. **CaseRename** *(Windows only)*: serial; dirs first, then files. Each rename is a two-step via a temporary name (`<name>.__dirsync_case__`) to force NTFS to update the stored directory-entry case (a direct `rename(old_case → new_case)` is a no-op on NTFS for case-only changes).
-5. **Symlink**: serial, near-instant. Any existing entry at the destination (regular file or symlink) is removed first, then `symlink()` / `CreateSymbolicLink()` creates the new link.
-6. **Copy / Overwrite (small, ≤ 1 MB)**: up to 8 concurrent workers via Tokio + Semaphore, or strictly serial when the drive profile reports either endpoint as spinning media (`serial_copies()`), since a copy reads SRC and writes DST in the same operation. Uses `std::fs::copy`, which resolves to `copy_file_range(2)` on Linux and `CopyFileEx` on Windows. Written to a temp file first (`.<name>.__dirsync_tmp__`), then atomically renamed, so DST is never left in a partial state. SRC mtime is preserved on DST after the rename.
-7. **Copy / Overwrite (large, > 1 MB)**: serial, chunked (256 KB buffer), with per-chunk progress events (~10/s). Same temp-then-rename pattern. SRC mtime is preserved.
-8. **TouchMtime**: serial; cheap metadata-only writes (`set_file_mtime`). Corrects DST files whose content is identical to SRC but whose mtime has drifted outside the 3 s tolerance.
-9. **Delete**: serial file removals.
-10. **RmDir**: serial directory removals, deepest-first.
+Ops are partitioned by type and executed in fixed phase order. Every serial phase goes through `run_serial`, which honours pause and cancel between ops:
 
-A safety gate at the start of `execute()` verifies every write target is inside `dst_root` before any op runs.
+1. **MkDir**: serial; must precede all writes. `create_dir_all` is used, so missing parent dirs are never a problem. If a non-directory occupies the target path (type conflict - SRC has a dir, DST has a file or link), it is removed first. MkDirs inside a renamed subtree are deferred to step 5.
+2. **Hoisted cleanup**: the Delete/RmDir ops of write targets that DST holds as a directory (`dir_blocked_targets`). A directory that survives (excluded content inside) is reported by name and the writes aimed at it are dropped.
+3. **Deletes of files occupying a dir-move target** (ENOTDIR/ERROR_ALREADY_EXISTS protection).
+4. **Move (files)**, topologically sorted: if move A would overwrite move B's source, B runs first; cycles are broken by renaming one participant to a temp name (`.<name>.__dirsync_swap_N__`). Then **Move (dirs)**. The two sets are independent (a dir rename needs an identical recursive fingerprint).
+5. **MkDir inside renamed subtrees**, after the dir moves that create their parents.
+6. **CaseRename**: serial; dirs first, then files. Each rename is a two-step via a temporary name (`<name>.__dirsync_case__`) to force a case-insensitive filesystem to update the stored directory-entry case; a failed second step is undone.
+7. **Symlink**: serial, near-instant. Any existing entry at the destination is removed first, then the link is created by its recorded kind: `symlink()` on Unix; `symlink_file` / `symlink_dir` on Windows, or a junction (mount-point reparse point, no privilege needed) for a SRC junction.
+8. **Copy / Overwrite (small, up to 1 MB)**: up to 8 concurrent workers via Tokio + Semaphore, or strictly serial when the drive profile reports either endpoint as spinning media (`serial_copies()`), since a copy reads SRC and writes DST in the same operation. Uses `std::fs::copy`, which resolves to `copy_file_range(2)` on Linux and `CopyFileEx` on Windows. Then **large (> 1 MB)**: serial, chunked (256 KB buffer), per-chunk progress events (~10/s), polling cancel per chunk, flushed with `sync_all` before commit. Both go through `stage_and_commit`: written to `<name>.__dirsync_tmp__`, checked that SRC's size and mtime did not change during the copy, given SRC's pre-copy mtime and permissions, then atomically renamed over the target (a readonly target is cleared first on Windows).
+9. **TouchMtime**: serial; cheap metadata-only writes (`set_file_mtime`), lifting and restoring a Windows readonly attribute around the write.
+10. **Delete**: serial file removals.
+11. **RmDir**: serial directory removals, deepest-first. A directory that is not empty (excluded content) is left in place.
+
+The run ends `Cancelled` if the cancel flag is set when the last phase returns (a cancel that interrupted the last op), `Done` otherwise. An op interrupted by a cancel is not a file error.
 
 Every non-Copy/Overwrite op that completes successfully calls `progress.record_bytes(OP_TOKEN_BYTES)` to credit its 128 KB token, keeping `done_bytes / total_bytes` consistent as the single progress metric throughout the run.
 
@@ -157,7 +166,7 @@ Every non-Copy/Overwrite op that completes successfully calls `progress.record_b
 
 ## Hashing (`fingerprint.rs`)
 
-`hash_file` computes SHA-256. For files ≤ 1 MB the full content is hashed. For larger files only the first 512 KB and last 512 KB are read and hashed together. This makes the hash a fast probabilistic identity check rather than a cryptographic guarantee: good enough for sync decisions, and orders of magnitude faster for large media files.
+`hash_file` computes SHA-256. For files up to 1 MB the full content is hashed, read no further than the size the walk recorded (a file that grew since is not read whole). For larger files only the first 512 KB and last 512 KB are read and hashed together. This makes the hash a fast probabilistic identity check rather than a cryptographic guarantee: good enough for sync decisions, and orders of magnitude faster for large media files.
 
 The 512 KB chunk size means two large files with identical head and tail but different middles will collide. This is an accepted trade-off: the probability is negligible for real-world sync scenarios, and the alternative (full hashing) would dominate runtime for large video/image libraries.
 
@@ -167,11 +176,13 @@ The 512 KB chunk size means two large files with identical head and tail but dif
 
 ```
 src/
-  lib.rs               - library root; re-exports SyncEngine
-  main.rs              - thin entrypoint; CLI arg parsing → run GUI or CLI mode
-  cli.rs               - CLI argument definitions
+  lib.rs               - library root; declares the public modules
+  main.rs              - thin entrypoint; CLI arg parsing, then GUI or CLI mode; maps errors to exit codes
+  cli.rs               - CLI argument definitions, help text, exit status constants
   cli_ui.rs            - terminal progress display for CLI mode
-  config.rs            - AppConfig (serde, platform config dir, defaults)
+  completions.rs       - shell completion scripts (bash, zsh, fish, PowerShell)
+  config.rs            - AppConfig (serde, platform config dir or DIRSYNC_CONFIG, defaults)
+  fmt.rs               - shared byte/count formatting
   drive.rs             - drive-type detection (Windows: TRIM IOCTL; Linux/macOS: sysinfo)
   error.rs             - SkipLog (collects per-file errors without aborting the run)
   paths.rs             - endpoint validation shared by CLI and GUI
@@ -184,10 +195,10 @@ src/
     matcher.rs         - match_trees → MatchOutput
     planner.rs         - plan() → SyncPlan + SyncOp
     executor.rs        - execute() - runs a SyncPlan, emits ProgressEvents
-    tests.rs           - integration tests (tempdir-based, tokio)
+    tests.rs           - in-crate tests for private items (tempdir-based, tokio)
   gui/
     mod.rs             - GUI entry point
-    server.rs          - axum router, same-origin middleware, graceful shutdown
+    server.rs          - axum router, session-token and same-origin middleware, graceful shutdown
     handlers.rs        - HTTP handler functions
     state.rs           - AppState (shared config, progress, plan, control channels)
     ws.rs              - WebSocket handler (streams ProgressEvents to browser)

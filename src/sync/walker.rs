@@ -27,14 +27,39 @@ impl ExcludeSet {
     }
 }
 
+/// A path below the walk root that could not be read, relative to the root.
+#[derive(Debug, Clone)]
+pub struct WalkError {
+    pub rel_path: PathBuf,
+    pub message: String,
+}
+
+/// Result of one walk: the entries it saw and the places it could not see.
+///
+/// The errors are load-bearing, not cosmetic: mirror semantics turn "not
+/// seen in SRC" into "delete from DST", so every unreadable SRC path must
+/// shield its DST counterpart (see `SyncEngine::preview`).
+#[derive(Debug, Default)]
+pub struct Walk {
+    pub entries: Vec<FileEntry>,
+    pub errors: Vec<WalkError>,
+}
+
+fn warn(progress: &Option<Arc<ProgressState>>, msg: String) {
+    match progress {
+        Some(p) => p.emit_log(LogLevel::Warning, msg),
+        None => eprintln!("Warning: {msg}"),
+    }
+}
+
 pub fn walk(
     root: &Path,
     excludes: &ExcludeSet,
     side: &str,
     progress: Option<Arc<ProgressState>>,
     cancel: &super::CancelToken,
-) -> Result<Vec<FileEntry>> {
-    let mut entries = Vec::new();
+) -> Result<Walk> {
+    let mut walked = Walk::default();
     let throttle = Duration::from_millis(500);
     let mut last_emit = Instant::now() - throttle;
 
@@ -61,11 +86,17 @@ pub fn walk(
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                if let Some(p) = &progress {
-                    p.emit_log(LogLevel::Warning, format!("Walk error: {e}"));
-                } else {
-                    eprintln!("Warning: walk error: {e}");
+                let failed = e.path().unwrap_or(root);
+                // The root itself is not a partial view but no view at all:
+                // an empty tree would plan deleting all of DST.
+                if e.depth() == 0 {
+                    anyhow::bail!("cannot read {}: {e}", root.display());
                 }
+                warn(&progress, format!("Walk error: {e}"));
+                walked.errors.push(WalkError {
+                    rel_path: failed.strip_prefix(root).unwrap_or(failed).to_path_buf(),
+                    message: e.to_string(),
+                });
                 continue;
             }
         };
@@ -79,14 +110,10 @@ pub fn walk(
         let rel_path = match entry.path().strip_prefix(root) {
             Ok(p) => p.to_path_buf(),
             Err(e) => {
-                if let Some(p) = &progress {
-                    p.emit_log(
-                        LogLevel::Warning,
-                        format!("Skipping {}: {e}", entry.path().display()),
-                    );
-                } else {
-                    eprintln!("Warning: skipping {}: {e}", entry.path().display());
-                }
+                warn(
+                    &progress,
+                    format!("Skipping {}: {e}", entry.path().display()),
+                );
                 continue;
             }
         };
@@ -108,7 +135,7 @@ pub fn walk(
         // Preserve symlinks as-is; never follow them into their target.
         if entry.path_is_symlink() {
             match std::fs::read_link(entry.path()) {
-                Ok(target) => entries.push(FileEntry {
+                Ok(target) => walked.entries.push(FileEntry {
                     rel_path,
                     abs_path: entry.path().to_path_buf(),
                     size: 0,
@@ -117,17 +144,14 @@ pub fn walk(
                     symlink_target: Some(target),
                 }),
                 Err(e) => {
-                    if let Some(p) = &progress {
-                        p.emit_log(
-                            LogLevel::Warning,
-                            format!("Cannot read symlink {}: {e}", entry.path().display()),
-                        );
-                    } else {
-                        eprintln!(
-                            "Warning: cannot read symlink {}: {e}",
-                            entry.path().display()
-                        );
-                    }
+                    warn(
+                        &progress,
+                        format!("Cannot read symlink {}: {e}", entry.path().display()),
+                    );
+                    walked.errors.push(WalkError {
+                        rel_path,
+                        message: e.to_string(),
+                    });
                 }
             }
             continue;
@@ -136,17 +160,14 @@ pub fn walk(
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(e) => {
-                if let Some(p) = &progress {
-                    p.emit_log(
-                        LogLevel::Warning,
-                        format!("Cannot read metadata for {}: {e}", entry.path().display()),
-                    );
-                } else {
-                    eprintln!(
-                        "Warning: cannot read metadata for {}: {e}",
-                        entry.path().display()
-                    );
-                }
+                warn(
+                    &progress,
+                    format!("Cannot read metadata for {}: {e}", entry.path().display()),
+                );
+                walked.errors.push(WalkError {
+                    rel_path,
+                    message: e.to_string(),
+                });
                 continue;
             }
         };
@@ -154,7 +175,7 @@ pub fn walk(
         let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let size = if metadata.is_dir() { 0 } else { metadata.len() };
 
-        entries.push(FileEntry {
+        walked.entries.push(FileEntry {
             rel_path,
             abs_path: entry.path().to_path_buf(),
             size,
@@ -173,7 +194,7 @@ pub fn walk(
         });
     }
 
-    Ok(entries)
+    Ok(walked)
 }
 
 /// Patterns that are always excluded regardless of user configuration.
@@ -196,11 +217,11 @@ const BUILTIN_EXCLUDES: &[&str] = &[
     ".*.__dirsync_swap_*__",
 ];
 
-pub fn build_excludes(patterns: &[String]) -> Result<ExcludeSet> {
+pub fn build_excludes(patterns: &[String]) -> ExcludeSet {
     let matchers = BUILTIN_EXCLUDES
         .iter()
         .map(|p| WildMatch::new(p))
         .chain(patterns.iter().map(|p| WildMatch::new(p)))
         .collect();
-    Ok(ExcludeSet(matchers))
+    ExcludeSet(matchers)
 }

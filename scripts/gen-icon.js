@@ -117,7 +117,10 @@ function renderIcon(size) {
     }
   }
 
-  // Downsample
+  // Downsample. Colour is averaged weighted by alpha (premultiplied, then
+  // divided by the summed alpha): a plain average would mix in the black of
+  // the fully transparent samples outside the rounded corners and leave a
+  // dark fringe on every edge pixel.
   const pixels = new Uint8Array(size * size * 4);
   const n = SS * SS;
   for (let y = 0; y < size; y++) {
@@ -126,13 +129,15 @@ function renderIcon(size) {
       for (let sy = 0; sy < SS; sy++) {
         for (let sx = 0; sx < SS; sx++) {
           const i = ((y * SS + sy) * big + (x * SS + sx)) * 4;
-          r += buf[i]; g += buf[i + 1]; b += buf[i + 2]; a += buf[i + 3];
+          const sa = buf[i + 3];
+          r += buf[i] * sa; g += buf[i + 1] * sa; b += buf[i + 2] * sa; a += sa;
         }
       }
       const p = (y * size + x) * 4;
-      pixels[p]     = Math.round((r / n) * 255);
-      pixels[p + 1] = Math.round((g / n) * 255);
-      pixels[p + 2] = Math.round((b / n) * 255);
+      const inv = a > 0 ? 1 / a : 0;
+      pixels[p]     = Math.round(r * inv * 255);
+      pixels[p + 1] = Math.round(g * inv * 255);
+      pixels[p + 2] = Math.round(b * inv * 255);
       pixels[p + 3] = Math.round((a / n) * 255);
     }
   }

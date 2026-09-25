@@ -30,19 +30,34 @@ pub fn fmt_bytes_styled(
     }
     let mut val = bytes as f64;
     for (i, &unit) in BYTE_UNITS.iter().enumerate().take(max_unit) {
-        if val < 1024.0 {
-            return match decimals {
-                Some(_) if i == 0 => format!("{bytes} B"),
-                Some(d) => format!("{val:.d$} {unit}"),
-                None if val < 10.0 => format!("{val:.2} {unit}"),
-                None if val < 100.0 => format!("{val:.1} {unit}"),
-                None => format!("{val:.0} {unit}"),
-            };
+        // Round at the precision that will be displayed before deciding
+        // anything: 1023.9996 KB must promote to "1.00 MB" rather than print
+        // "1024 KB", and 9.995 must drop to one decimal ("10.0") rather than
+        // print "10.00". A value whose rounding reaches 1024 falls through
+        // to the next unit.
+        let shown = match decimals {
+            Some(_) if i == 0 => (bytes < 1024).then(|| format!("{bytes} B")),
+            Some(d) => rounded_below(val, d, 1024.0).map(|s| format!("{s} {unit}")),
+            None => rounded_below(val, 2, 10.0)
+                .or_else(|| rounded_below(val, 1, 100.0))
+                .or_else(|| rounded_below(val, 0, 1024.0))
+                .map(|s| format!("{s} {unit}")),
+        };
+        if let Some(s) = shown {
+            return s;
         }
         val /= 1024.0;
     }
     let d = decimals.unwrap_or(1);
     format!("{val:.d$} {}", BYTE_UNITS[max_unit])
+}
+
+/// `val` rendered with `d` decimals, if that rendering is below `limit`.
+/// Compares the rounded text, not `val`, so the decision always agrees with
+/// what is printed.
+fn rounded_below(val: f64, d: usize, limit: f64) -> Option<String> {
+    let s = format!("{val:.d$}");
+    (s.parse::<f64>().unwrap_or(f64::INFINITY) < limit).then_some(s)
 }
 
 /// Auto-scaled B→TB with precision by magnitude: the CLI plan-summary style.

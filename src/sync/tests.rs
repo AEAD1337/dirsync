@@ -10,6 +10,7 @@ use tempfile::TempDir;
 use crate::config::AppConfig;
 use crate::progress::{ProgressEvent, ProgressState};
 use crate::sync::SyncEngine;
+use crate::sync::planner::{SyncOp, SyncPlan};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,32 +43,61 @@ fn set_mtime_to_past(path: &Path) {
     set_file_mtime(path, FileTime::from_system_time(past)).unwrap();
 }
 
+/// Execute `plan` and return the skip log, whatever it holds.
+async fn execute_plan(engine: &SyncEngine, plan: SyncPlan) -> crate::error::SkipLog {
+    let (tx, _rx) = tokio::sync::broadcast::channel::<ProgressEvent>(64);
+    let progress = Arc::new(ProgressState::new(tx));
+    let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    engine.run(plan, progress, false, pause_rx, cancel_rx).await
+}
+
+/// Execute `plan` and fail the test if any op failed. A final tree that
+/// happens to match SRC does not prove the run was clean: an op error can
+/// be masked by a later op or by the fixture itself.
+async fn execute_plan_ok(engine: &SyncEngine, plan: SyncPlan) {
+    let log = execute_plan(engine, plan).await;
+    let errors: Vec<String> = log
+        .iter()
+        .map(|e| format!("{}: {}", e.path.display(), e.message))
+        .collect();
+    assert!(errors.is_empty(), "the run reported op errors: {errors:#?}");
+}
+
+/// Preview only: the plan the first run would execute.
+async fn preview_plan(src: &Path, dst: &Path) -> SyncPlan {
+    SyncEngine::new(src.to_path_buf(), dst.to_path_buf(), default_config())
+        .preview(None, None)
+        .await
+        .unwrap()
+}
+
 async fn run_sync(src: &Path, dst: &Path) {
     let cfg = default_config();
     let engine = SyncEngine::new(src.to_path_buf(), dst.to_path_buf(), cfg);
     let plan = engine.preview(None, None).await.unwrap();
-
-    let (tx, _rx) = tokio::sync::broadcast::channel::<ProgressEvent>(64);
-    let progress = Arc::new(ProgressState::new(tx));
-    let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-
-    engine.run(plan, progress, false, pause_rx, cancel_rx).await;
+    execute_plan_ok(&engine, plan).await;
 }
 
 /// Run a sync with an explicit drive profile: exercises the serial hashing
 /// and serial copy paths that the default (SSD) profile never reaches.
-async fn run_sync_with_drives(src: &Path, dst: &Path, drives: crate::drive::DriveProfile) {
+/// Returns the plan the run executed so callers can assert on its shape.
+async fn run_sync_with_drives(
+    src: &Path,
+    dst: &Path,
+    drives: crate::drive::DriveProfile,
+) -> SyncPlan {
     let engine =
         SyncEngine::new(src.to_path_buf(), dst.to_path_buf(), default_config()).with_drives(drives);
     let plan = engine.preview(None, None).await.unwrap();
+    execute_plan_ok(&engine, plan.clone()).await;
+    plan
+}
 
-    let (tx, _rx) = tokio::sync::broadcast::channel::<ProgressEvent>(64);
-    let progress = Arc::new(ProgressState::new(tx));
-    let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-
-    engine.run(plan, progress, false, pause_rx, cancel_rx).await;
+/// Execute an already-previewed plan for `src` -> `dst`, asserting a clean run.
+async fn run_previewed(src: &Path, dst: &Path, plan: SyncPlan) {
+    let engine = SyncEngine::new(src.to_path_buf(), dst.to_path_buf(), default_config());
+    execute_plan_ok(&engine, plan).await;
 }
 
 /// Assert that DST is an exact mirror of SRC: same relative files, same content.
@@ -135,11 +165,35 @@ async fn test_basic_copy() {
 }
 
 // ---------------------------------------------------------------------------
-// Bug 1: circular swap (different sizes - old code would clobber content)
+// Same-path pairs with swapped or rotated content
+//
+// These fixtures look like swaps and rotations, but every SRC path also
+// exists in DST, so the matcher pairs each file with its same-path twin and
+// the planner emits Overwrites, never Moves: a Move's source must be a
+// DST-only path and its target a SRC path. The executor's cycle breaking is
+// exercised by the hand-built Move plans in tests/executor.rs instead.
 // ---------------------------------------------------------------------------
 
+/// Assert the first plan rewrites `overwrites` files in place and moves none.
+fn assert_overwrites_not_moves(plan: &SyncPlan, overwrites: usize) {
+    assert_eq!(
+        plan.overwrite_count,
+        overwrites,
+        "{}: {:?}",
+        plan.summary(),
+        plan.ops
+    );
+    assert_eq!(plan.move_count, 0, "{}: {:?}", plan.summary(), plan.ops);
+    assert_eq!(plan.copy_count, 0, "{}: {:?}", plan.summary(), plan.ops);
+    assert!(
+        !plan.ops.iter().any(|op| matches!(op, SyncOp::Move { .. })),
+        "{:?}",
+        plan.ops
+    );
+}
+
 #[tokio::test]
-async fn test_circular_swap_different_sizes() {
+async fn test_same_path_swapped_content_different_sizes_becomes_overwrites() {
     let tmp = TempDir::new().unwrap();
     let src = tmp.path().join("src");
     let dst = tmp.path().join("dst");
@@ -151,19 +205,19 @@ async fn test_circular_swap_different_sizes() {
     write_file(&src.join("a.txt"), a_content);
     write_file(&src.join("b.txt"), b_content);
 
-    // DST: a.txt=B (20 bytes), b.txt=A (10 bytes): they have been swapped.
-    // The matcher will detect: a.txt in SRC matches b.txt in DST (same hash),
-    // and b.txt in SRC matches a.txt in DST.
+    // DST: a.txt=B (20 bytes), b.txt=A (10 bytes): the contents are swapped,
+    // but both paths exist on both sides, so each pairs with its twin.
     write_file(&dst.join("a.txt"), b_content);
     write_file(&dst.join("b.txt"), a_content);
-    // Different sizes: move detection triggers via hash; no mtime adjustment needed.
 
-    run_sync(&src, &dst).await;
+    let plan = preview_plan(&src, &dst).await;
+    assert_overwrites_not_moves(&plan, 2);
+    run_previewed(&src, &dst, plan).await;
     assert_mirror(&src, &dst);
 }
 
 #[tokio::test]
-async fn test_circular_swap_same_size() {
+async fn test_same_path_swapped_content_same_size_becomes_overwrites() {
     let tmp = TempDir::new().unwrap();
     let src = tmp.path().join("src");
     let dst = tmp.path().join("dst");
@@ -181,16 +235,14 @@ async fn test_circular_swap_same_size() {
     write_file(&dst.join("b.txt"), a_content);
     set_mtime_to_past(&dst.join("b.txt"));
 
-    run_sync(&src, &dst).await;
+    let plan = preview_plan(&src, &dst).await;
+    assert_overwrites_not_moves(&plan, 2);
+    run_previewed(&src, &dst, plan).await;
     assert_mirror(&src, &dst);
 }
 
-// ---------------------------------------------------------------------------
-// Bug 1b: 3-way cycle
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
-async fn test_three_way_cycle() {
+async fn test_same_path_rotated_content_becomes_overwrites() {
     let tmp = TempDir::new().unwrap();
     let src = tmp.path().join("src");
     let dst = tmp.path().join("dst");
@@ -204,8 +256,8 @@ async fn test_three_way_cycle() {
     write_file(&src.join("b.txt"), b);
     write_file(&src.join("c.txt"), c);
 
-    // DST: a=C, b=A, c=B  (rotated: needs a→b, b→c, c→a)
-    // Same size: force hash comparison by making DST mtimes old.
+    // DST: a=C, b=A, c=B (rotated). Same size: force hash comparison by
+    // making DST mtimes old.
     write_file(&dst.join("a.txt"), c);
     set_mtime_to_past(&dst.join("a.txt"));
     write_file(&dst.join("b.txt"), a);
@@ -213,26 +265,21 @@ async fn test_three_way_cycle() {
     write_file(&dst.join("c.txt"), b);
     set_mtime_to_past(&dst.join("c.txt"));
 
-    run_sync(&src, &dst).await;
+    let plan = preview_plan(&src, &dst).await;
+    assert_overwrites_not_moves(&plan, 3);
+    run_previewed(&src, &dst, plan).await;
     assert_mirror(&src, &dst);
 }
 
-// ---------------------------------------------------------------------------
-// Bug 2: move chain + orphan delete conflict
-// ---------------------------------------------------------------------------
-
-/// SRC: a.txt (X bytes), b.txt (Y bytes)
-/// DST: a.txt (Y bytes = SRC b), b.txt (Z unique bytes), c.txt (X bytes = SRC a)
+/// SRC: a.txt (X), b.txt (Y)
+/// DST: a.txt (Y), b.txt (Z, unique), c.txt (X)
 ///
-/// Matcher produces:
-///   SRC a → move from DST c.txt   (X content)
-///   SRC b → move from DST a.txt   (Y content)
-///   DST b.txt is an orphan        → Delete b.txt
-///
-/// The old bug: moves execute a→c→?, then Delete b.txt removes whatever ended
-/// up there. With the fix, the Delete should not clobber a correctly-moved file.
+/// Both SRC paths have a same-path DST twin, so a and b are overwritten in
+/// place; c.txt is a plain orphan and is deleted even though its content
+/// equals SRC a.txt. The Delete must not remove anything the overwrites
+/// produced.
 #[tokio::test]
-async fn test_move_chain_orphan_delete_no_conflict() {
+async fn test_same_path_overwrites_with_a_content_twin_orphan() {
     let tmp = TempDir::new().unwrap();
     let src = tmp.path().join("src");
     let dst = tmp.path().join("dst");
@@ -245,43 +292,15 @@ async fn test_move_chain_orphan_delete_no_conflict() {
     write_file(&src.join("a.txt"), x);
     write_file(&src.join("b.txt"), y);
 
-    // DST: a.txt=Y, b.txt=Z (orphan), c.txt=X
+    // DST: a.txt=Y, b.txt=Z, c.txt=X
     write_file(&dst.join("a.txt"), y);
     write_file(&dst.join("b.txt"), z);
     write_file(&dst.join("c.txt"), x);
 
-    run_sync(&src, &dst).await;
-    assert_mirror(&src, &dst);
-}
-
-// ---------------------------------------------------------------------------
-// Bug 3: move chain ordering (no cycle, but must run in dependency order)
-// ---------------------------------------------------------------------------
-
-/// DST has a chain: file1 → needs to move to where file2 currently is,
-/// and file2 needs to move elsewhere.  Alphabetical order would execute
-/// file1's move first, clobbering file2's source.
-#[tokio::test]
-async fn test_move_chain_ordering() {
-    let tmp = TempDir::new().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-
-    let content_a = b"FILE_A_CONTENT__".as_ref(); // 16 bytes
-    let content_b = b"FILE_B_CONTENT__".as_ref(); // 16 bytes (same size, diff content)
-
-    // SRC: a.txt=A, b.txt=B
-    write_file(&src.join("a.txt"), content_a);
-    write_file(&src.join("b.txt"), content_b);
-
-    // DST: a.txt=B (SRC's b), b.txt=A (SRC's a).
-    // Same size: force hash comparison by making DST mtimes old.
-    write_file(&dst.join("a.txt"), content_b);
-    set_mtime_to_past(&dst.join("a.txt"));
-    write_file(&dst.join("b.txt"), content_a);
-    set_mtime_to_past(&dst.join("b.txt"));
-
-    run_sync(&src, &dst).await;
+    let plan = preview_plan(&src, &dst).await;
+    assert_overwrites_not_moves(&plan, 2);
+    assert_eq!(plan.delete_count, 1, "{:?}", plan.ops);
+    run_previewed(&src, &dst, plan).await;
     assert_mirror(&src, &dst);
 }
 
@@ -345,7 +364,22 @@ async fn test_dir_rename_with_new_file() {
     // DST: original_dir/old.txt (same content as SRC renamed_dir/old.txt)
     write_file(&dst.join("original_dir/old.txt"), b"old content");
 
-    run_sync(&src, &dst).await;
+    // old.txt is relocated, not re-copied: only the new file transfers.
+    let plan = preview_plan(&src, &dst).await;
+    assert_eq!(plan.move_count, 1, "{}: {:?}", plan.summary(), plan.ops);
+    assert_eq!(plan.copy_count, 1, "{}: {:?}", plan.summary(), plan.ops);
+    assert_eq!(plan.delete_count, 0, "{}: {:?}", plan.summary(), plan.ops);
+    let copied: Vec<_> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            SyncOp::Copy { dst, .. } => Some(dst.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(copied, vec![dst.join("renamed_dir").join("new.txt")]);
+
+    run_previewed(&src, &dst, plan).await;
     assert_mirror(&src, &dst);
 }
 
@@ -478,11 +512,7 @@ async fn test_same_hash_many_files_new_added() {
 async fn run_sync_with_config(src: &Path, dst: &Path, config: Arc<AppConfig>) {
     let engine = SyncEngine::new(src.to_path_buf(), dst.to_path_buf(), config);
     let plan = engine.preview(None, None).await.unwrap();
-    let (tx, _rx) = tokio::sync::broadcast::channel::<ProgressEvent>(64);
-    let progress = Arc::new(ProgressState::new(tx));
-    let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    engine.run(plan, progress, false, pause_rx, cancel_rx).await;
+    execute_plan_ok(&engine, plan).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -722,8 +752,23 @@ async fn test_dir_rename_idempotent() {
     write_file(&src.join("new_name/file.txt"), b"content");
     write_file(&dst.join("old_name/file.txt"), b"content");
 
-    // First sync: rename old_name → new_name.
-    run_sync(&src, &dst).await;
+    // First sync: rename old_name -> new_name, as one directory Move.
+    let plan = preview_plan(&src, &dst).await;
+    let dir_moves: Vec<_> = plan
+        .ops
+        .iter()
+        .filter(|op| matches!(op, SyncOp::Move { is_dir: true, .. }))
+        .collect();
+    assert_eq!(dir_moves.len(), 1, "{}: {:?}", plan.summary(), plan.ops);
+    assert!(
+        matches!(dir_moves[0], SyncOp::Move { from, to, .. }
+            if *from == dst.join("old_name") && *to == dst.join("new_name")),
+        "{:?}",
+        dir_moves[0]
+    );
+    assert_eq!(plan.copy_count, 0, "{:?}", plan.ops);
+    assert_eq!(plan.delete_count, 0, "{:?}", plan.ops);
+    run_previewed(&src, &dst, plan).await;
     assert_mirror(&src, &dst);
 
     // Second preview: DST already matches SRC: must produce zero ops.
@@ -814,7 +859,21 @@ async fn test_file_moved_across_dirs() {
         b"UNIQUE_RELOCATED_CONTENT",
     );
 
-    run_sync(&src, &dst).await;
+    // One file-level Move; a regression to Copy + Delete must fail here.
+    let plan = preview_plan(&src, &dst).await;
+    assert_eq!(plan.move_count, 1, "{}: {:?}", plan.summary(), plan.ops);
+    assert_eq!(plan.copy_count, 0, "{:?}", plan.ops);
+    assert_eq!(plan.delete_count, 0, "{:?}", plan.ops);
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, SyncOp::Move { from, to, is_dir: false }
+            if *from == dst.join("sub_a").join("relocated.txt")
+                && *to == dst.join("sub_b").join("relocated.txt"))),
+        "{:?}",
+        plan.ops
+    );
+    run_previewed(&src, &dst, plan).await;
     assert_mirror(&src, &dst);
 
     // Second preview: zero ops.
@@ -841,24 +900,48 @@ async fn test_duplicate_hash_in_src_copies_not_moves() {
     let dst = tmp.path().join("dst");
 
     let content = b"IDENTICAL_CONTENT_IN_BOTH_FILES";
+    let unique = b"UNIQUE_CONTENT_THAT_DOES_MOVE";
 
     // SRC: two files with identical content.
     write_file(&src.join("a.txt"), content);
     write_file(&src.join("b.txt"), content);
+    // A control pair with distinct content: this one really is relocated, so
+    // the fixture proves the matcher does emit Moves when a source is free.
+    write_file(&src.join("moved_here.txt"), unique);
 
     // DST: only a.txt (same content, old mtime to force hash comparison).
     write_file(&dst.join("a.txt"), content);
     set_mtime_to_past(&dst.join("a.txt"));
+    write_file(&dst.join("was_here.txt"), unique);
 
-    run_sync(&src, &dst).await;
-    assert_mirror(&src, &dst);
-
-    // a.txt must still have its original content (not moved away as b.txt's source).
-    let a_content = fs::read(dst.join("a.txt")).unwrap();
-    assert_eq!(
-        a_content, content,
-        "a.txt must not have been used as a move source"
+    let plan = preview_plan(&src, &dst).await;
+    // b.txt is copied; DST a.txt is reserved for its own same-path match
+    // and never claimed as b.txt's move source.
+    assert_eq!(plan.copy_count, 1, "{}: {:?}", plan.summary(), plan.ops);
+    assert_eq!(plan.move_count, 1, "{}: {:?}", plan.summary(), plan.ops);
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, SyncOp::Copy { dst: d, .. }
+            if *d == dst.join("b.txt"))),
+        "{:?}",
+        plan.ops
     );
+    let moves: Vec<_> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            SyncOp::Move { from, to, .. } => Some((from.clone(), to.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        moves,
+        vec![(dst.join("was_here.txt"), dst.join("moved_here.txt"))],
+        "only the unique file moves: a.txt must not be a move source"
+    );
+    run_previewed(&src, &dst, plan).await;
+    assert_mirror(&src, &dst);
 
     // Second preview: zero ops.
     let cfg = default_config();
@@ -1127,7 +1210,7 @@ fn test_walk_aborts_when_cancelled() {
     write_file(&src.join("sub/b.txt"), b"b");
 
     let (_tx, cancel) = cancelled_token();
-    let excludes = walker::build_excludes(&[]).unwrap();
+    let excludes = walker::build_excludes(&[]);
     let err = walker::walk(&src, &excludes, "src", None, &cancel)
         .expect_err("a cancelled walk must fail, never return a partial tree");
     assert_eq!(err.to_string(), "cancelled");
@@ -1142,10 +1225,14 @@ fn test_match_trees_aborts_when_cancelled() {
     write_file(&src.join("a.txt"), b"content");
     write_file(&dst.join("b.txt"), b"content");
 
-    let excludes = walker::build_excludes(&[]).unwrap();
+    let excludes = walker::build_excludes(&[]);
     let live = crate::sync::CancelToken::default();
-    let src_entries = walker::walk(&src, &excludes, "src", None, &live).unwrap();
-    let dst_entries = walker::walk(&dst, &excludes, "dst", None, &live).unwrap();
+    let src_entries = walker::walk(&src, &excludes, "src", None, &live)
+        .unwrap()
+        .entries;
+    let dst_entries = walker::walk(&dst, &excludes, "dst", None, &live)
+        .unwrap()
+        .entries;
 
     let (_tx, cancel) = cancelled_token();
     let result = matcher::match_trees(
@@ -1215,8 +1302,22 @@ async fn test_sync_correct_under_every_drive_profile() {
         write_file(&dst.join("orphan.txt"), b"delete me");
         set_mtime_to_past(&dst.join("changed.txt"));
 
-        run_sync_with_drives(&src, &dst, DriveProfile { src_hdd, dst_hdd }).await;
+        let plan = run_sync_with_drives(&src, &dst, DriveProfile { src_hdd, dst_hdd }).await;
 
+        // The relocated file is a Move under every profile, never Copy + Delete.
+        let profile = format!("src_hdd={src_hdd}, dst_hdd={dst_hdd}");
+        assert_eq!(plan.move_count, 1, "{profile}: {:?}", plan.ops);
+        assert_eq!(plan.copy_count, 1, "{profile}: {:?}", plan.ops);
+        assert_eq!(plan.overwrite_count, 1, "{profile}: {:?}", plan.ops);
+        assert_eq!(plan.delete_count, 1, "{profile}: {:?}", plan.ops);
+        assert!(
+            plan.ops
+                .iter()
+                .any(|op| matches!(op, SyncOp::Move { from, .. }
+                if *from == dst.join("was_here.bin"))),
+            "{profile}: {:?}",
+            plan.ops
+        );
         assert_mirror(&src, &dst);
         assert!(
             !dst.join("orphan.txt").exists(),
@@ -1413,4 +1514,56 @@ async fn test_case_only_dir_rename_with_content_change() {
     );
     assert_eq!(fs::read(dst.join("photos/new.jpg")).unwrap(), b"new-image");
     assert_no_ops_on_preview(&src, &dst).await;
+}
+
+// ---------------------------------------------------------------------------
+// Staging: a source that changes under the copy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_source_rewritten_during_the_copy_fails_the_op_and_keeps_dst() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let s = src.path().join("db.bin");
+    let d = dst.path().join("db.bin");
+    write_file(&s, b"version-1");
+    write_file(&d, b"old-copy!");
+    set_mtime_to_past(&s);
+
+    // The writer stands in for the copy loop: it copies, then the "database"
+    // rewrites its file in place (same size, new mtime) before the commit.
+    let result = crate::sync::executor::stage_and_commit(&s, &d, |tmp| {
+        fs::copy(&s, tmp)?;
+        fs::write(&s, b"version-2")?;
+        Ok(())
+    });
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("changed during copy"), "{err}");
+    assert_eq!(fs::read(&d).unwrap(), b"old-copy!");
+    let names: Vec<_> = fs::read_dir(dst.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names.len(), 1, "staging file left behind: {names:?}");
+}
+
+#[test]
+fn a_committed_copy_carries_the_mtime_the_source_had_before_the_copy() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let s = src.path().join("a.bin");
+    let d = dst.path().join("a.bin");
+    write_file(&s, b"payload");
+    set_mtime_to_past(&s);
+    let before = fs::metadata(&s).unwrap().modified().unwrap();
+
+    crate::sync::executor::stage_and_commit(&s, &d, |tmp| {
+        fs::copy(&s, tmp)?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(fs::read(&d).unwrap(), b"payload");
+    assert_eq!(fs::metadata(&d).unwrap().modified().unwrap(), before);
 }

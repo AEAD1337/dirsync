@@ -8,6 +8,8 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 
+mod common;
+
 fn write_file(dir: &Path, rel: &str, content: &[u8]) {
     let path = dir.join(rel);
     if let Some(parent) = path.parent() {
@@ -17,7 +19,7 @@ fn write_file(dir: &Path, rel: &str, content: &[u8]) {
 }
 
 fn no_excludes() -> dirsync::sync::walker::ExcludeSet {
-    build_excludes(&[]).unwrap()
+    build_excludes(&[])
 }
 
 fn not_cancelled() -> CancelToken {
@@ -49,7 +51,9 @@ fn walk_collects_files_and_directories() {
     write_file(root.path(), "a.txt", b"hello");
     write_file(root.path(), "sub/b.txt", b"world!");
 
-    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled()).unwrap();
+    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     assert_eq!(rel_paths(&entries), vec!["a.txt", "sub", "sub/b.txt"]);
 }
@@ -60,7 +64,9 @@ fn walk_records_size_and_dir_flag() {
     write_file(root.path(), "a.txt", b"hello");
     fs::create_dir(root.path().join("empty")).unwrap();
 
-    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled()).unwrap();
+    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     let file = entries.iter().find(|e| !e.is_dir).unwrap();
     assert_eq!(file.size, 5);
@@ -77,7 +83,9 @@ fn walk_skips_the_root_itself() {
     let root = TempDir::new().unwrap();
     write_file(root.path(), "a.txt", b"x");
 
-    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled()).unwrap();
+    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     assert!(entries.iter().all(|e| !e.rel_path.as_os_str().is_empty()));
 }
@@ -88,8 +96,10 @@ fn walk_prunes_excluded_directories() {
     write_file(root.path(), "keep.txt", b"x");
     write_file(root.path(), "node_modules/dep/index.js", b"x");
 
-    let excludes = build_excludes(&["node_modules".to_string()]).unwrap();
-    let entries = walk(root.path(), &excludes, "src", None, &not_cancelled()).unwrap();
+    let excludes = build_excludes(&["node_modules".to_string()]);
+    let entries = walk(root.path(), &excludes, "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     assert_eq!(rel_paths(&entries), vec!["keep.txt"]);
 }
@@ -100,8 +110,10 @@ fn walk_applies_glob_excludes_per_component() {
     write_file(root.path(), "keep.txt", b"x");
     write_file(root.path(), "scratch.tmp", b"x");
 
-    let excludes = build_excludes(&["*.tmp".to_string()]).unwrap();
-    let entries = walk(root.path(), &excludes, "src", None, &not_cancelled()).unwrap();
+    let excludes = build_excludes(&["*.tmp".to_string()]);
+    let entries = walk(root.path(), &excludes, "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     assert_eq!(rel_paths(&entries), vec!["keep.txt"]);
 }
@@ -113,14 +125,16 @@ fn walk_excludes_dirsync_staging_files_without_configuration() {
     write_file(root.path(), "leftover.__dirsync_tmp__", b"x");
     write_file(root.path(), "case.__dirsync_case__", b"x");
 
-    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled()).unwrap();
+    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     assert_eq!(rel_paths(&entries), vec!["keep.txt"]);
 }
 
 #[test]
 fn exclude_set_matches_builtin_and_user_patterns() {
-    let excludes = build_excludes(&["*.bak".to_string()]).unwrap();
+    let excludes = build_excludes(&["*.bak".to_string()]);
 
     assert!(excludes.is_match(std::ffi::OsStr::new("System Volume Information")));
     assert!(excludes.is_match(std::ffi::OsStr::new("$Recycle.Bin")));
@@ -180,14 +194,31 @@ async fn walk_returns_the_cancel_sentinel_when_cancelled() {
     assert_eq!(err.to_string(), "cancelled");
 }
 
-#[tokio::test]
-async fn walk_logs_a_warning_instead_of_failing_on_an_unreadable_root() {
+#[test]
+fn walk_fails_on_an_unreadable_root() {
     let root = TempDir::new().unwrap();
     let missing = root.path().join("does-not-exist");
 
+    // An unreadable root must never read as an empty tree: an empty SRC
+    // plans the deletion of everything in DST.
+    let err = walk(&missing, &no_excludes(), "src", None, &not_cancelled()).unwrap_err();
+
+    assert!(err.to_string().contains("does-not-exist"), "{err}");
+}
+
+#[tokio::test]
+async fn walk_reports_an_unlistable_subdirectory() {
+    let root = TempDir::new().unwrap();
+    write_file(root.path(), "open/a.txt", b"a");
+    write_file(root.path(), "locked/b.txt", b"b");
+    let Some(_guard) = common::deny_listing(&root.path().join("locked")) else {
+        eprintln!("skipped: cannot deny listing here");
+        return;
+    };
+
     let (progress, mut rx) = new_progress_channel();
-    let entries = walk(
-        &missing,
+    let walked = walk(
+        root.path(),
         &no_excludes(),
         "src",
         Some(Arc::clone(&progress)),
@@ -195,22 +226,17 @@ async fn walk_logs_a_warning_instead_of_failing_on_an_unreadable_root() {
     )
     .unwrap();
 
-    assert!(entries.is_empty());
+    let failed: Vec<String> = walked
+        .errors
+        .iter()
+        .map(|e| dirsync::paths::to_slash(&e.rel_path))
+        .collect();
+    assert_eq!(failed, vec!["locked".to_string()]);
+    assert!(rel_paths(&walked.entries).contains(&"open/a.txt".to_string()));
     let logged = drain(&mut rx)
         .iter()
-        .any(|e| matches!(e, ProgressEvent::LogEntry(l) if l.message.contains("Walk error")));
+        .any(|e| matches!(e, ProgressEvent::LogEntry(l) if l.message.contains("locked")));
     assert!(logged, "the walk error should reach the log panel");
-}
-
-#[test]
-fn walk_without_progress_still_survives_an_unreadable_root() {
-    let root = TempDir::new().unwrap();
-    let missing = root.path().join("does-not-exist");
-
-    // The no-progress branch prints to stderr instead of emitting a log event.
-    let entries = walk(&missing, &no_excludes(), "src", None, &not_cancelled()).unwrap();
-
-    assert!(entries.is_empty());
 }
 
 #[test]
@@ -219,17 +245,15 @@ fn walk_records_symlinks_without_following_them() {
     write_file(root.path(), "target.txt", b"payload");
 
     let link = root.path().join("link.txt");
-    #[cfg(unix)]
-    let created = std::os::unix::fs::symlink("target.txt", &link).is_ok();
-    // Windows only allows this with Developer Mode or elevation: when the
-    // symlink cannot be created there is nothing to assert, so skip.
-    #[cfg(windows)]
-    let created = std::os::windows::fs::symlink_file("target.txt", &link).is_ok();
-    if !created {
+    // Windows only allows this with Developer Mode or elevation; the helper
+    // asserts that a refusal is exactly the missing-privilege error.
+    if !common::symlink_file_or_unprivileged(Path::new("target.txt"), &link) {
         return;
     }
 
-    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled()).unwrap();
+    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     let link_entry = entries
         .iter()
@@ -266,13 +290,14 @@ fn walk_records_a_directory_junction_without_descending_into_it() {
             root.path().join("target").to_str().unwrap(),
         ])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !created {
-        return;
-    }
+        .unwrap();
+    // Junctions need no privilege: a failure here is a broken fixture, not
+    // a reason to skip.
+    assert!(created.status.success(), "{created:?}");
 
-    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled()).unwrap();
+    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
     let paths = rel_paths(&entries);
 
     let junction = entries
@@ -296,15 +321,13 @@ fn walk_records_a_dangling_symlink() {
     let root = TempDir::new().unwrap();
 
     let link = root.path().join("dangling");
-    #[cfg(unix)]
-    let created = std::os::unix::fs::symlink("no-such-file", &link).is_ok();
-    #[cfg(windows)]
-    let created = std::os::windows::fs::symlink_file("no-such-file", &link).is_ok();
-    if !created {
+    if !common::symlink_file_or_unprivileged(Path::new("no-such-file"), &link) {
         return;
     }
 
-    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled()).unwrap();
+    let entries = walk(root.path(), &no_excludes(), "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     let entry = entries
         .iter()
@@ -324,8 +347,10 @@ fn walk_keeps_paths_a_separator_pattern_cannot_match() {
     let root = TempDir::new().unwrap();
     write_file(root.path(), "build/temp/file.txt", b"x");
 
-    let excludes = build_excludes(&["build/temp".to_string()]).unwrap();
-    let entries = walk(root.path(), &excludes, "src", None, &not_cancelled()).unwrap();
+    let excludes = build_excludes(&["build/temp".to_string()]);
+    let entries = walk(root.path(), &excludes, "src", None, &not_cancelled())
+        .unwrap()
+        .entries;
 
     assert_eq!(
         rel_paths(&entries),
@@ -334,19 +359,56 @@ fn walk_keeps_paths_a_separator_pattern_cannot_match() {
 }
 
 /// The walk is cancellable between entries, not just at phase boundaries: a
-/// token that flips after the walk starts still aborts it, and it aborts with
-/// an error rather than the entries collected so far. A truncated DST walk
-/// would make real files look like orphans, and orphans get deleted.
-#[tokio::test]
-async fn walk_aborts_rather_than_returning_a_partial_tree() {
+/// token that flips after the walk has started still aborts it, and it aborts
+/// with an error rather than the entries collected so far. A truncated DST
+/// walk would make real files look like orphans, and orphans get deleted.
+///
+/// The token starts clear and is flipped by a subscriber reacting to the
+/// walk's first ScanProgress event, which is emitted while processing the
+/// first entry: so the flip provably happens mid-walk. The subscriber runs on
+/// its own thread and could in theory lose the race against a fast walk, so a
+/// walk that completes is retried; a walker that only checks the token up
+/// front completes every attempt and fails the test.
+#[test]
+fn walk_aborts_when_the_token_flips_mid_walk() {
     let root = TempDir::new().unwrap();
-    for i in 0..50 {
-        write_file(root.path(), &format!("f{i}.txt"), b"x");
+    for d in 0..20 {
+        for f in 0..100 {
+            write_file(root.path(), &format!("d{d}/f{f}.txt"), b"x");
+        }
     }
 
-    let (tx, rx) = watch::channel(false);
-    let cancel = CancelToken::new(Some(rx));
-    tx.send(true).unwrap();
+    for attempt in 0..5 {
+        let (tx, rx) = watch::channel(false);
+        let cancel = CancelToken::new(Some(rx));
+        let (progress, mut events) = new_progress_channel();
+        let flipper = std::thread::spawn(move || {
+            while let Ok(ev) = events.blocking_recv() {
+                if matches!(ev, ProgressEvent::ScanProgress { .. }) {
+                    tx.send_replace(true);
+                    return true;
+                }
+            }
+            false
+        });
 
-    assert!(walk(root.path(), &no_excludes(), "src", None, &cancel).is_err());
+        assert!(!cancel.is_cancelled(), "the walk must start uncancelled");
+        let result = walk(root.path(), &no_excludes(), "src", Some(progress), &cancel);
+        // The walk dropped its progress handle: the channel closes and the
+        // flipper returns even if it never saw an event.
+        let flipped = flipper.join().unwrap();
+        assert!(flipped, "the walk never emitted ScanProgress");
+
+        match result {
+            Err(e) => {
+                assert_eq!(e.to_string(), "cancelled");
+                return;
+            }
+            Ok(w) => eprintln!(
+                "attempt {attempt}: walk finished ({} entries) before the flip landed",
+                w.entries.len()
+            ),
+        }
+    }
+    panic!("a token flipped mid-walk never aborted the walk");
 }

@@ -53,10 +53,28 @@ EXCLUDE PATTERNS:
 
 EXIT STATUS:
     0    Success, nothing to do, or dry run
-    1    Run finished but one or more files failed and were skipped
-    2    Usage error
+    1    Finished, but files failed or paths could not be read (see stderr)
+    2    Usage error: bad flags, missing or invalid SRC/DST, unreadable --config
+    3    Fatal error: the sync could not be planned or started
     130  Cancelled with Ctrl-C
 ";
+
+/// Exit status contract (see EXIT STATUS in the help text).
+pub const EXIT_PARTIAL: i32 = 1;
+pub const EXIT_USAGE: i32 = 2;
+pub const EXIT_FATAL: i32 = 3;
+pub const EXIT_CANCELLED: i32 = 130;
+
+/// Exit status for an error that ended the run early. A cancel surfaces as
+/// the `"cancelled"` sentinel from any preview phase and must still read as
+/// a cancel, not as a failure.
+pub fn exit_code_for(err: &anyhow::Error) -> i32 {
+    if err.to_string() == "cancelled" {
+        EXIT_CANCELLED
+    } else {
+        EXIT_FATAL
+    }
+}
 
 /// Print the same help text `-h` / `--help` produces.
 pub fn print_help() {
@@ -67,7 +85,7 @@ pub fn parse() -> Args {
     let args = parse_from(lexopt::Parser::from_env());
     if let Err(e) = validate(&args) {
         eprintln!("Error: {e}");
-        std::process::exit(2);
+        std::process::exit(EXIT_USAGE);
     }
     args
 }

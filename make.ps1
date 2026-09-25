@@ -12,6 +12,10 @@ function Run-Command {
     )
 
     Write-Host ">> $Command" -ForegroundColor Cyan
+    # Reset first: $LASTEXITCODE only changes when a native program runs, so
+    # a stale non-zero value (npm outdated in `update`) would otherwise fail
+    # a later command that never set it.
+    $global:LASTEXITCODE = 0
     Invoke-Expression $Command
 
     if ($LASTEXITCODE -ne 0) {
@@ -103,21 +107,26 @@ switch ($Action) {
         Run-Frontend "npm update --no-fund"
         Push-Location frontend
         try { npm outdated } catch {}
-        Pop-Location
+        finally { Pop-Location }
+        # Do not let npm outdated's informational exit 1 become the script's.
+        $global:LASTEXITCODE = 0
     }
 
+    # No explicit `npm run build` before cargo: build.rs runs Vite itself
+    # whenever the gui feature is on, after syncing the version into
+    # package.json, so an earlier Vite run would be redundant and stale.
     "build" {
-        Run-Frontend "npm install --no-fund", "npm run build", "npm run check"
+        Run-Frontend "npm install --no-fund", "npm run check"
         Run-CargoChecks
     }
 
     "run" {
-        Run-Frontend "npm install --no-fund --no-audit", "npm run build"
+        Run-Frontend "npm install --no-fund --no-audit"
         Run-Command "cargo run --features gui -- --gui"
     }
 
     "all" {
-        Run-Frontend "npm clean-install --no-fund", "npm run build", "npm run check"
+        Run-Frontend "npm clean-install --no-fund", "npm run check"
         Run-Command "rustup update"
         Run-Command "cargo update"
         Run-CargoChecks
@@ -125,7 +134,7 @@ switch ($Action) {
     }
 
     "release" {
-        Run-Frontend "npm install --no-fund", "npm run build", "npm run check"
+        Run-Frontend "npm install --no-fund", "npm run check"
         Run-Command "rustup update"
         Run-Command "cargo update"
         Run-CargoChecks "--release"

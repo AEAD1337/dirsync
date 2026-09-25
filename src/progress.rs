@@ -51,8 +51,13 @@ pub enum ProgressEvent {
     FileDone {
         name: String,
     },
+    /// An op failed. `name` is the absolute DST path the op targeted.
     FileError {
         name: String,
+        message: String,
+    },
+    /// A preview ended in an error other than a cancel.
+    PreviewFailed {
         message: String,
     },
     OpDone {
@@ -177,27 +182,29 @@ impl ProgressState {
     pub fn record_bytes(&self, bytes: u64) {
         let now_done = self.done_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
         let mut ring = self.speed_ring.lock().unwrap();
-        ring.push_back((Instant::now(), now_done));
-        // Keep only last 10 seconds
-        // checked_sub: `Instant - Duration` panics on underflow, which is
-        // reachable on clocks whose epoch is process/boot start.
-        let Some(cutoff) = Instant::now().checked_sub(Duration::from_secs(10)) else {
-            return;
-        };
-        while ring.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
-            ring.pop_front();
-        }
+        let now = Instant::now();
+        ring.push_back((now, now_done));
+        trim_speed_ring(&mut ring, now);
     }
 
     /// MB/s average over last 10 s window.
     pub fn speed_mbps(&self) -> f64 {
-        let ring = self.speed_ring.lock().unwrap();
+        self.speed_mbps_at(Instant::now())
+    }
+
+    /// [`speed_mbps`](Self::speed_mbps) measured at `now`. The window is
+    /// trimmed and closed against the clock rather than against the newest
+    /// sample, so a stalled copy decays to 0 instead of freezing speed and
+    /// ETA at the last values it had while bytes were still arriving.
+    pub fn speed_mbps_at(&self, now: Instant) -> f64 {
+        let mut ring = self.speed_ring.lock().unwrap();
+        trim_speed_ring(&mut ring, now);
         if ring.len() < 2 {
             return 0.0;
         }
         let (t0, b0) = ring.front().unwrap();
-        let (t1, b1) = ring.back().unwrap();
-        let elapsed = t1.duration_since(*t0).as_secs_f64();
+        let (_, b1) = ring.back().unwrap();
+        let elapsed = now.saturating_duration_since(*t0).as_secs_f64();
         if elapsed < 0.001 {
             return 0.0;
         }
@@ -281,6 +288,18 @@ impl ProgressState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<ProgressEvent> {
         self.tx.subscribe()
+    }
+}
+
+/// Drop speed samples older than the 10 s window ending at `now`.
+fn trim_speed_ring(ring: &mut VecDeque<(Instant, u64)>, now: Instant) {
+    // checked_sub: `Instant - Duration` panics on underflow, which is
+    // reachable on clocks whose epoch is process/boot start.
+    let Some(cutoff) = now.checked_sub(Duration::from_secs(10)) else {
+        return;
+    };
+    while ring.front().is_some_and(|(t, _)| *t < cutoff) {
+        ring.pop_front();
     }
 }
 
