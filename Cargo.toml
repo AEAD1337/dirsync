@@ -70,3 +70,13 @@ sysinfo = { version = "0.39", default-features = false, features = ["disk"] }
 strip = "symbols"
 lto = "thin"
 codegen-units = 1
+# Optimised for size: about 28% smaller than opt-level 3, with no measurable
+# cost on hashing or copying, which are bound by the SHA hardware
+# instructions and the disk (see doc/decisions.md).
+opt-level = "s"
+
+# The fingerprint hash stays at full speed optimisation: CPUs without SHA
+# instructions run SHA-256 in plain code, where size optimisation hurts the
+# hot loops. About 10 KB of binary size.
+[profile.release.package.sha2]
+opt-level = 3

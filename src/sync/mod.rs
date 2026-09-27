@@ -95,7 +95,7 @@ impl SyncEngine {
         cancel_rx: Option<watch::Receiver<bool>>,
     ) -> Result<planner::SyncPlan> {
         let mut out = None;
-        self.preview_with(progress, cancel_rx, |plan| out = Some(plan))
+        self.preview_with(progress, cancel_rx, Box::new(|plan| out = Some(plan)))
             .await?;
         out.ok_or_else(|| anyhow::anyhow!("preview produced no plan"))
     }
@@ -103,11 +103,15 @@ impl SyncEngine {
     /// `preview`, handing the plan to `deliver` *before* the Previewing
     /// status is released, so a caller that publishes it (the GUI stores it
     /// and emits PlanReady) is done before any observer sees Idle.
+    ///
+    /// `deliver` is boxed rather than generic: a generic parameter compiled
+    /// this whole state machine once per caller (CLI and GUI, about 20 KB
+    /// each) to save one indirect call per preview.
     pub async fn preview_with(
         &self,
         progress: Option<Arc<ProgressState>>,
         cancel_rx: Option<watch::Receiver<bool>>,
-        deliver: impl FnOnce(planner::SyncPlan),
+        deliver: Box<dyn FnOnce(planner::SyncPlan) + Send + '_>,
     ) -> Result<()> {
         let cancel = CancelToken::new(cancel_rx);
         let cancelled = || cancel.is_cancelled();

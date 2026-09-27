@@ -268,12 +268,16 @@ pub async fn post_preview(
         // Previewing claim: an Idle arriving first showed an empty plan and
         // re-enabled Preview while plan_ready was still in flight.
         let result = engine
-            .preview_with(Some(progress.clone()), Some(cancel_rx), move |plan| {
-                let log_msg = plan_log_message(&plan);
-                *deliver_state.last_plan.write().unwrap() = Some(plan);
-                deliver_progress.emit(crate::progress::ProgressEvent::PlanReady);
-                deliver_progress.emit_log(LogLevel::Info, log_msg);
-            })
+            .preview_with(
+                Some(progress.clone()),
+                Some(cancel_rx),
+                Box::new(move |plan| {
+                    let log_msg = plan_log_message(&plan);
+                    *deliver_state.last_plan.write().unwrap() = Some(plan);
+                    deliver_progress.emit(crate::progress::ProgressEvent::PlanReady);
+                    deliver_progress.emit_log(LogLevel::Info, log_msg);
+                }),
+            )
             .await;
         if let Err(e) = result {
             if e.to_string() == "cancelled" {

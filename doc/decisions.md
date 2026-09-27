@@ -183,6 +183,18 @@ The 1 MB threshold matches the partial-hashing threshold, which is a coincidence
 
 ---
 
+## Release builds are optimised for size
+
+**Decision:** `opt-level = "s"` for the release profile, with the `sha2` crate kept at `opt-level = 3`. `panic` stays `unwind`.
+
+**Why:** measured on the 1.1.7 GUI build (Ryzen 7 PRO 5750G, NVMe SSD, median of 5-7 runs): 4.25 MB at level 3 became 3.05 MB (-28%), and hashing 1.5-2 GB, copying 20,000 small files and copying 2 x 1 GB all stayed within run-to-run noise. Hashing runs on the CPU's SHA instructions and copying waits on the disk, so how tightly the surrounding code is optimised does not show. `opt-level = 3` also cloned whole async functions per call site (function specialization), which is where much of its size went.
+
+**Why sha2 at 3:** CPUs without SHA instructions compute SHA-256 in plain code, and those tight loops are exactly what size optimisation slows down. Keeping one small crate at full optimisation costs about 10 KB and removes that risk. It could not be measured on the test machine, which has the instructions.
+
+**Why not `panic = "abort"`:** it would save another 1 MB, but a bug anywhere (a GUI request handler, a copy worker) would end the whole process at once instead of failing one request or one file. **Why not `"z"`:** barely smaller than `"s"`, and it tends to cost speed.
+
+---
+
 ## build.rs writes into the source tree
 
 **Decision:** `build.rs` writes back into the working tree. On every `cargo build`:
