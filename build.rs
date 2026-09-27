@@ -979,6 +979,19 @@ fn sync_npm_version(frontend: &Path, cargo_version: &str) {
 // Windows executable icon
 // ---------------------------------------------------------------------------
 
+/// Original and internal name for the Windows version resource. The
+/// CLI-only build ships as `dirsync-cli.exe` (see release.yml), and scanners
+/// report the embedded original filename, so it must match the file.
+// Only embed_icon (Windows) calls it; the tests use it on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn exe_names(gui: bool) -> (&'static str, &'static str) {
+    if gui {
+        ("dirsync.exe", "dirsync")
+    } else {
+        ("dirsync-cli.exe", "dirsync-cli")
+    }
+}
+
 #[cfg(all(windows, not(test)))]
 fn embed_icon() {
     let icon = manifest_dir().join("assets/icon.ico");
@@ -1000,8 +1013,9 @@ fn embed_icon() {
         "LegalCopyright",
         &format!("Copyright (c) 2026 AEAD1337, {license}"),
     );
-    res.set("OriginalFilename", "dirsync.exe");
-    res.set("InternalName", "dirsync");
+    let (original, internal) = exe_names(std::env::var("CARGO_FEATURE_GUI").is_ok());
+    res.set("OriginalFilename", original);
+    res.set("InternalName", internal);
     if let Err(e) = res.compile() {
         println!("cargo:warning=Failed to embed Windows icon: {e}");
     }
