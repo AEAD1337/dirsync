@@ -6,6 +6,7 @@ pub mod config;
 pub mod drive;
 pub mod error;
 pub mod fmt;
+pub mod instances;
 pub mod paths;
 pub mod progress;
 pub mod sync;

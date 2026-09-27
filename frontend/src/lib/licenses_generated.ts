@@ -49,7 +49,7 @@ export const licenses: LicenseEntry[] = [
   { name: "equivalent", version: "1.0.2", license: "Apache-2.0 OR MIT", copyright: "© 2016--2023", url: "https://github.com/indexmap-rs/equivalent" },
   { name: "errno", version: "0.3.14", license: "MIT OR Apache-2.0", copyright: "© 2014 Chris Wong", url: "https://github.com/lambda-fairy/rust-errno" },
   { name: "esm-env", version: "1.2.2", license: "MIT", copyright: "© 2022 Benjamin McCann", url: "https://github.com/benmccann/esm-env" },
-  { name: "esrap", version: "2.3.12", license: "MIT", copyright: "© 2023-2025 these people", url: "https://github.com/sveltejs/esrap" },
+  { name: "esrap", version: "2.3.14", license: "MIT", copyright: "© 2023-2025 these people", url: "https://github.com/sveltejs/esrap" },
   { name: "filetime", version: "0.2.29", license: "MIT/Apache-2.0", copyright: "© 2014 Alex Crichton", url: "https://github.com/alexcrichton/filetime" },
   { name: "form_urlencoded", version: "1.2.2", license: "MIT OR Apache-2.0", copyright: "© 2013-2016 The rust-url developers", url: "https://github.com/servo/rust-url" },
   { name: "futures-channel", version: "0.3.34", license: "MIT OR Apache-2.0", copyright: "© 2016 Alex Crichton", url: "https://github.com/rust-lang/futures-rs" },
@@ -163,7 +163,7 @@ export const licenses: LicenseEntry[] = [
   { name: "windows-sys", version: "0.61.2", license: "MIT OR Apache-2.0", copyright: "© Microsoft Corporation.", url: "https://github.com/microsoft/windows-rs" },
   { name: "windows-threading", version: "0.2.1", license: "MIT OR Apache-2.0", copyright: "© Microsoft Corporation.", url: "https://github.com/microsoft/windows-rs" },
   { name: "winnow", version: "1.0.4", license: "MIT", copyright: "", url: "https://github.com/winnow-rs/winnow" },
-  { name: "zerocopy", version: "0.8.58", license: "BSD-2-Clause OR Apache-2.0 OR MIT", copyright: "© 2023 The Fuchsia Authors", url: "https://github.com/google/zerocopy" },
+  { name: "zerocopy", version: "0.8.59", license: "BSD-2-Clause OR Apache-2.0 OR MIT", copyright: "© 2023 The Fuchsia Authors", url: "https://github.com/google/zerocopy" },
   { name: "zimmerframe", version: "1.1.5", license: "MIT", copyright: "© 2023 these people", url: "https://github.com/sveltejs/zimmerframe" },
   { name: "zmij", version: "1.0.23", license: "MIT", copyright: "© David Tolnay", url: "https://github.com/dtolnay/zmij" },
 ];

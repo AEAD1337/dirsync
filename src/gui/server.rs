@@ -134,11 +134,36 @@ pub fn record_lag(state: &AppState, missed: u64) {
     record_log(state, entry);
 }
 
+/// How many ports above the configured one a further window may take.
+const PORT_FALLBACKS: u16 = 20;
+
+/// Bind `port`, or the next free one above it when another dirsync window
+/// (or anything else) already holds it. The chosen port is used for this
+/// run only and never saved.
+pub async fn bind_free(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+    let last = port.saturating_add(PORT_FALLBACKS);
+    let mut candidate = port;
+    loop {
+        match tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], candidate))).await {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && candidate < last => {
+                candidate += 1;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("ports {port}-{last} are all in use; pass --port to choose another"),
+                ));
+            }
+            other => return other,
+        }
+    }
+}
+
 pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
     // Bind first and derive everything user-visible - printed URL, browser
     // open, Host/Origin allowlist - from the *actual* bound address, so a
     // port the OS reassigns can never produce an unreachable UI.
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
+    let listener = bind_free(port).await?;
     let addr = listener.local_addr()?;
     let port = addr.port();
 

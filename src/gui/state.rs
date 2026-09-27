@@ -32,6 +32,10 @@ pub struct AppState {
     /// short grace period and then shuts down: a page reload reconnects well
     /// inside it, so refreshing no longer kills the backend.
     pub ws_clients: AtomicUsize,
+    /// This window's entry in the cross-instance registry, so several windows
+    /// can work side by side without mirroring into each other's folders.
+    /// Unset (tests, or a registry that could not be opened): no checks.
+    pub instances: std::sync::OnceLock<crate::instances::Registry>,
 }
 
 impl AppState {
@@ -60,9 +64,28 @@ impl AppState {
             yolo,
             log_buffer: Mutex::new(VecDeque::new()),
             ws_clients: AtomicUsize::new(0),
+            instances: std::sync::OnceLock::new(),
         });
 
         (state, rx)
+    }
+
+    /// Claim `src -> dst` (canonical) for this window. `Err` carries the
+    /// message for a refusal; a registry that cannot be read only warns,
+    /// because the check is a safety net, not a precondition for syncing.
+    pub fn claim_pair(&self, src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+        let Some(reg) = self.instances.get() else {
+            return Ok(());
+        };
+        match reg.claim(src, dst) {
+            Ok(()) => Ok(()),
+            Err(e @ crate::instances::ClaimError::Conflict { .. }) => Err(e.to_string()),
+            Err(e) => {
+                self.progress
+                    .emit_log(crate::progress::LogLevel::Warning, e.to_string());
+                Ok(())
+            }
+        }
     }
 
     pub fn pause_rx(&self) -> watch::Receiver<bool> {

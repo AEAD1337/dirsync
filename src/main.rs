@@ -1,6 +1,6 @@
 #[cfg(feature = "gui")]
 use dirsync::gui;
-use dirsync::{cli, cli_ui, completions, config, drive, paths, progress, sync};
+use dirsync::{cli, cli_ui, completions, config, drive, instances, paths, progress, sync};
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -17,6 +17,22 @@ async fn main() -> std::process::ExitCode {
         }
     };
     std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+/// This process's entry in the cross-instance registry. `None` only when it
+/// cannot be opened: the check is a safety net, so that warns rather than
+/// refusing to sync.
+fn open_registry() -> Option<instances::Registry> {
+    let dir = instances::Registry::default_dir()?;
+    match instances::Registry::open(&dir) {
+        Ok(reg) => Some(reg),
+        Err(e) => {
+            eprintln!(
+                "Warning: instance registry unavailable ({e}); overlapping runs are not detected."
+            );
+            None
+        }
+    }
 }
 
 /// Print a usage error and exit with the usage status.
@@ -74,6 +90,9 @@ async fn real_main() -> Result<i32> {
                 config.last_dst = Some(p);
             }
             let (state, _rx) = gui::state::AppState::new(config, auto_preview, args.yolo);
+            if let Some(reg) = open_registry() {
+                let _ = state.instances.set(reg);
+            }
             gui::start(state, port).await?;
             return Ok(0);
         }
@@ -100,6 +119,17 @@ async fn real_main() -> Result<i32> {
     // out of every log line and error message.
     let (canon_src, canon_dst) =
         paths::validate_endpoints(&src, &dst, args.yolo).unwrap_or_else(|e| usage_error(e));
+
+    // Held until the process ends: another dirsync (a GUI window, a second
+    // CLI run) must not be mirroring into or out of these folders.
+    let _registry = open_registry();
+    if let Some(reg) = &_registry {
+        match reg.claim(&canon_src, &canon_dst) {
+            Ok(()) => {}
+            Err(e @ instances::ClaimError::Conflict { .. }) => usage_error(e),
+            Err(e) => eprintln!("Warning: {e}"),
+        }
+    }
 
     let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);

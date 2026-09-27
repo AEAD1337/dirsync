@@ -458,6 +458,12 @@
       // protecting the run: recover state silently instead of alerting.
       if (auto && err instanceof ApiError && err.status === 409) return;
       if (isAuthError(err)) return; // the banner says it
+      // 423: another dirsync window uses these folders. Never silent, the
+      // startup auto-preview included: the user has to pick other folders.
+      if (err instanceof ApiError && err.status === 423) {
+        alert(err.message.replace(/^.*?-> 423: /, ''));
+        return;
+      }
       alert(`Preview failed: ${err}`);
     }
   }
@@ -470,7 +476,11 @@
       await api.run(false, skippedPrefixes, $src, $dst);
     } catch (err) {
       running = false;
-      if (!isAuthError(err)) alert(`Run failed: ${err}`);
+      if (err instanceof ApiError && err.status === 423) {
+        alert(err.message.replace(/^.*?-> 423: /, ''));
+      } else if (!isAuthError(err)) {
+        alert(`Run failed: ${err}`);
+      }
     }
   }
 

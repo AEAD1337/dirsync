@@ -183,6 +183,7 @@ src/
   completions.rs       - shell completion scripts (bash, zsh, fish, PowerShell)
   config.rs            - AppConfig (serde, platform config dir or DIRSYNC_CONFIG, defaults)
   fmt.rs               - shared byte/count formatting
+  instances.rs         - cross-instance registry: refuses overlapping folders between running instances
   drive.rs             - drive-type detection (Windows: TRIM IOCTL; Linux/macOS: sysinfo)
   error.rs             - SkipLog (collects per-file errors without aborting the run)
   paths.rs             - endpoint validation shared by CLI and GUI

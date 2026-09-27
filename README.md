@@ -97,7 +97,7 @@ path: `*.tmp` and `node_modules` work, `build/temp` never matches.
 Exit status: `0` success, nothing to do, or dry run; `1` finished, but one or
 more files failed or paths could not be read (listed on stderr); `2` usage
 error (bad flags, missing or invalid SRC/DST, a `--config` file that cannot be
-loaded); `3` fatal error, the sync could not be planned or started; `130`
+loaded, folders in use by another running dirsync); `3` fatal error, the sync could not be planned or started; `130`
 cancelled with Ctrl-C.
 
 **Safety checks**
@@ -144,6 +144,13 @@ also printed). The GUI is served locally; no data leaves the machine. The token
 is random per launch and gates every API call, so other users of the same
 machine cannot drive your instance. A tab opened without it (a bookmark, the
 bare address) shows a "not authorized" banner: open the printed URL instead.
+
+Several windows can run side by side, for example one mirroring drive A to B
+and another C to D: a further `dirsync --gui` takes the next free port (7374,
+7375, ...; never saved) and opens its own tab. Each running dirsync, GUI or
+CLI, registers the folders it works on, and a preview or run that would write
+into, or read from while writing, another instance's folders is refused.
+Reading the same SRC from two instances is allowed.
 
 Passing SRC and DST alongside `--gui` pre-fills both paths and runs a preview
 immediately, provided both already exist as directories:

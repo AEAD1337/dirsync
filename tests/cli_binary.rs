@@ -381,3 +381,35 @@ fn a_cancel_during_any_preview_phase_maps_to_the_cancel_status() {
     assert_eq!(exit_code_for(&anyhow::anyhow!("cancelled")), EXIT_CANCELLED);
     assert_eq!(exit_code_for(&anyhow::anyhow!("disk on fire")), EXIT_FATAL);
 }
+
+#[test]
+fn a_run_into_a_dst_another_instance_uses_is_refused() {
+    let shared = TempDir::new().unwrap();
+    let src = TempDir::new().unwrap();
+    let other_src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    write_file(src.path(), "a.txt", b"a");
+    write_file(dst.path(), "theirs.txt", b"written by the other instance");
+    // Another dirsync (a GUI window, say) is mirroring into the same DST.
+    let other = dirsync::instances::Registry::open(&shared.path().join("locks")).unwrap();
+    other
+        .claim(
+            &other_src.path().canonicalize().unwrap(),
+            &dst.path().canonicalize().unwrap(),
+        )
+        .unwrap();
+
+    let out = Command::new(EXE)
+        .args([src.path().to_str().unwrap(), dst.path().to_str().unwrap()])
+        .env("DIRSYNC_CONFIG", shared.path().join("config.toml"))
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "stdout: {}", stdout(&out));
+    assert!(
+        stderr(&out).contains("in use by another dirsync"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(dst.path().join("theirs.txt").exists());
+}

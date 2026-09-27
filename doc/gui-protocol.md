@@ -1,6 +1,6 @@
 # GUI Protocol
 
-The GUI is served by an embedded axum HTTP server, default port 7373, bound to `127.0.0.1` only. Every API and WebSocket request passes three checks (`require_session` in `server.rs`):
+The GUI is served by an embedded axum HTTP server, default port 7373, bound to `127.0.0.1` only. When the port is taken (typically by another dirsync window), the server takes the next free one up to 20 ports higher; the port actually bound is the one printed, opened and checked in `Host`/`Origin`, and it is never saved. Every API and WebSocket request passes three checks (`require_session` in `server.rs`):
 
 1. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`, else `403 Forbidden` (DNS rebinding).
 2. An `Origin` header, when present, must be `http://127.0.0.1:<port>` or `http://localhost:<port>`, else `403` (browser CSRF).
@@ -50,7 +50,7 @@ Request:
 }
 ```
 
-Both paths must end with a directory separator. The server validates that both paths exist, are directories, are not system-critical (unless `--yolo`) and are not nested inside each other; a failure returns `400 Bad Request` with the reason as the body, synchronously, with no WebSocket event. `409 Conflict` means a run or another preview is in progress. `last_src` / `last_dst` in the config are updated as a side effect.
+Both paths must end with a directory separator. The server validates that both paths exist, are directories, are not system-critical (unless `--yolo`) and are not nested inside each other; a failure returns `400 Bad Request` with the reason as the body, synchronously, with no WebSocket event. `409 Conflict` means a run or another preview is in progress in this window. `423 Locked` means another running dirsync instance (another window, or a CLI run) uses an overlapping folder: this window's DST overlaps their SRC or DST, or this window's SRC overlaps their DST; the body names the folders. Unlike a 409 it is never retried silently. `last_src` / `last_dst` in the config are updated as a side effect.
 
 On success the server emits `drive_mode` immediately after detecting drive types, then `scan_update` events during the walk, then `plan_ready` when done, and only then the `status_changed` to `idle` (the plan is stored before the status is released). A SRC or DST root that cannot be read fails the preview. A directory *below* the root that cannot be read is logged as a warning: nothing at or below its DST counterpart is deleted or used as a move source. On any other error the server emits `preview_failed` and resets status to `idle`.
 
@@ -101,7 +101,7 @@ Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no 
 ### Run
 
 #### `POST /api/v1/run`
-Starts executing the last computed plan. Returns `202 Accepted`; `409 Conflict` if a sync is already running, if a preview is in progress, or if `src`/`dst` differ from the stored plan's roots (the user edited the paths after previewing); `400 Bad Request` if no plan exists. A real run drops the plan server-side whether it finished or was cancelled: nothing records which ops already ran, so a replay would redo every completed move and delete and fail them against the correct files. Running again requires a new preview. A dry run changes nothing and keeps the plan.
+Starts executing the last computed plan. Returns `202 Accepted`; `409 Conflict` if a sync is already running, if a preview is in progress, or if `src`/`dst` differ from the stored plan's roots (the user edited the paths after previewing); `400 Bad Request` if no plan exists; `423 Locked` if another dirsync instance claimed an overlapping folder since the preview. A real run drops the plan server-side whether it finished or was cancelled: nothing records which ops already ran, so a replay would redo every completed move and delete and fail them against the correct files. Running again requires a new preview. A dry run changes nothing and keeps the plan.
 
 Request:
 ```json

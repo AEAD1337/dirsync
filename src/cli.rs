@@ -54,7 +54,8 @@ EXCLUDE PATTERNS:
 EXIT STATUS:
     0    Success, nothing to do, or dry run
     1    Finished, but files failed or paths could not be read (see stderr)
-    2    Usage error: bad flags, missing or invalid SRC/DST, unreadable --config
+    2    Usage error: bad flags, missing or invalid SRC/DST, unreadable --config,
+         or folders in use by another running dirsync
     3    Fatal error: the sync could not be planned or started
     130  Cancelled with Ctrl-C
 ";

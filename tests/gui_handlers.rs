@@ -734,3 +734,73 @@ async fn a_dry_run_keeps_the_plan_and_changes_nothing() {
     let kept = kept.as_ref().expect("a dry run must keep its plan");
     assert_eq!(kept.ops.len(), 1);
 }
+
+// --- Several windows side by side ---
+
+fn state_with_registry(dir: &TempDir) -> Arc<AppState> {
+    let state = state_with_config(dir, AppConfig::default(), false);
+    let reg = dirsync::instances::Registry::open(&dir.path().join("locks")).unwrap();
+    assert!(state.instances.set(reg).is_ok());
+    state
+}
+
+fn canonical_dirs(dir: &TempDir, names: &[&str]) -> Vec<PathBuf> {
+    names
+        .iter()
+        .map(|n| {
+            let p = dir.path().join(n);
+            std::fs::create_dir_all(&p).unwrap();
+            p.canonicalize().unwrap()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_preview_into_another_windows_dst_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with_registry(&dir);
+    let d = canonical_dirs(&dir, &["a", "b", "c"]);
+    let other = dirsync::instances::Registry::open(&dir.path().join("locks")).unwrap();
+    other.claim(&d[0], &d[1]).unwrap();
+
+    let body = handlers::PreviewRequest {
+        src: format!("{}/", dir.path().join("c").display()),
+        dst: format!("{}/", dir.path().join("b").display()),
+        excludes: vec![],
+    };
+    let (code, msg) = handlers::post_preview(State(state.clone()), Json(body))
+        .await
+        .unwrap_err();
+
+    // 423, not 409: the frontend treats 409 as "busy, retry quietly".
+    assert_eq!(code, StatusCode::LOCKED);
+    assert!(msg.contains("in use by another dirsync"), "{msg}");
+    // The refused preview must not leave the window stuck in "previewing".
+    assert_eq!(*state.progress.status.read().unwrap(), SyncStatus::Idle);
+}
+
+#[tokio::test]
+async fn a_run_whose_dst_another_window_took_since_the_preview_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with_registry(&dir);
+    let d = canonical_dirs(&dir, &["a", "b", "c"]);
+    let (src, dst) = (dir.path().join("a"), dir.path().join("b"));
+    *state.last_plan.write().unwrap() = Some(plan_for(
+        src.clone(),
+        dst.clone(),
+        vec![SyncOp::MkDir {
+            path: dst.join("new"),
+        }],
+    ));
+    let other = dirsync::instances::Registry::open(&dir.path().join("locks")).unwrap();
+    other.claim(&d[2], &d[1]).unwrap();
+
+    let (code, msg) = handlers::post_run(State(state.clone()), Json(run_request(&src, &dst)))
+        .await
+        .unwrap_err();
+
+    // 423, not 409: the frontend treats 409 as "busy, retry quietly".
+    assert_eq!(code, StatusCode::LOCKED);
+    assert!(msg.contains("in use by another dirsync"), "{msg}");
+    assert!(!dst.join("new").exists());
+}

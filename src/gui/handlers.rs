@@ -183,13 +183,13 @@ pub async fn post_preview(
     // CLI mode: see `crate::paths`.
     // canonicalize/metadata block for the full OS timeout on a dead share:
     // keep them off the async workers that drive the progress stream.
-    {
+    let (canon_src, canon_dst) = {
         let (src, dst, yolo) = (src.clone(), dst.clone(), state.yolo);
         tokio::task::spawn_blocking(move || crate::paths::validate_endpoints(&src, &dst, yolo))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    }
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?
+    };
 
     // Claim Previewing under the same write-lock discipline as post_run's run
     // claim. Without it a preview started mid-run reset the executor's shared
@@ -198,8 +198,9 @@ pub async fn post_preview(
     // plan was confirmed, and a preview finishing mid-run wrote Idle over
     // Running: letting a second executor start. Serializing previews and
     // rejecting them during runs closes all three.
-    {
+    let previous = {
         let mut status = state.progress.status.write().unwrap();
+        let previous = status.clone();
         match *status {
             crate::progress::SyncStatus::Running | crate::progress::SyncStatus::Paused => {
                 return Err((
@@ -216,6 +217,23 @@ pub async fn post_preview(
             _ => {}
         }
         *status = crate::progress::SyncStatus::Previewing;
+        previous
+    };
+
+    // Another dirsync window must not be using these folders. Claimed after
+    // the status claim, so a preview rejected for running concurrently does
+    // not move this window's registered pair.
+    {
+        let state2 = state.clone();
+        let claimed =
+            tokio::task::spawn_blocking(move || state2.claim_pair(&canon_src, &canon_dst))
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Err(msg) = claimed {
+            *state.progress.status.write().unwrap() = previous;
+            // 423, not 409: the frontend retries a 409 ("busy") quietly.
+            return Err((StatusCode::LOCKED, msg));
+        }
     }
 
     let mut config = state.config.read().unwrap().clone();
@@ -470,6 +488,23 @@ pub async fn post_run(
             StatusCode::CONFLICT,
             "SRC/DST changed since the last preview: run a new preview first".into(),
         ));
+    }
+
+    // Re-checked at run time: another window may have claimed an
+    // overlapping folder since this preview.
+    {
+        let (state2, src, dst) = (state.clone(), plan.src_root.clone(), plan.dst_root.clone());
+        let claimed = tokio::task::spawn_blocking(move || {
+            let src = crate::paths::canonicalize_or_partial(&src);
+            let dst = crate::paths::canonicalize_or_partial(&dst);
+            state2.claim_pair(&src, &dst)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Err(msg) = claimed {
+            release_claim();
+            return Err((StatusCode::LOCKED, msg));
+        }
     }
 
     let plan = if body.skip_prefixes.is_empty() {

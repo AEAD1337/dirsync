@@ -141,3 +141,18 @@ fn every_launch_gets_a_fresh_unguessable_token() {
     assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     assert_ne!(a, b);
 }
+
+#[tokio::test]
+async fn a_busy_port_falls_back_to_the_next_free_one() {
+    // A second dirsync window must not die on the first one's port.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+
+    let listener = dirsync::gui::server::bind_free(port).await.unwrap();
+
+    let got = listener.local_addr().unwrap().port();
+    assert!(
+        got > port && got <= port.saturating_add(20),
+        "{port} -> {got}"
+    );
+}

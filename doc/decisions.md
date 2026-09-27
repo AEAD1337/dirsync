@@ -265,6 +265,24 @@ All write calls are guarded with a content comparison and only write when the co
 
 ---
 
+## Several instances run side by side, never on each other's folders
+
+**Decision:** A further GUI window takes the next free port (up to 20 above the configured one, never saved) instead of failing to start. Every running dirsync, GUI or CLI, records the folder pair it works on in a registry next to the config file (`locks/<id>.json`) and holds an OS file lock on `locks/<id>.lock` for as long as it lives. A preview or run is refused (GUI: `423 Locked`; CLI: exit 2) when its DST overlaps another instance's SRC or DST, or its SRC overlaps another instance's DST. Overlap means the same folder or one inside the other. Two instances reading one SRC are allowed.
+
+**Why:** the use case is two syncs on independent drives at once (A -> B and C -> D). The danger is two mirrors meeting in one folder: each deletes the other's files as orphans, or one rewrites the tree the other is mirroring.
+
+**Why a registry, not a lock file in DST:** nothing is ever written into SRC or DST that the sync did not plan, and a lock file there would itself have to be excluded from every walk.
+
+**Why OS file locks for liveness:** an entry whose `.lock` can be taken belongs to a process that is gone, so a crash or kill never blocks a folder for good, with no process-id bookkeeping. Check and claim run under one exclusive lock on `locks/registry.lock`, so two windows claiming at the same moment cannot both win.
+
+**Granularity:** a GUI window holds the pair it last previewed until it previews another pair or exits; the claim is checked again at run time. A CLI run holds its pair for the whole process.
+
+**Failure mode:** a registry that cannot be opened or written only warns. The check is a safety net for a mistake, not a precondition for syncing.
+
+**Shared config:** all instances share `config.toml`; the last save wins for last-used paths, theme and exclusions, so a new window opens pre-filled with the most recently used folders.
+
+---
+
 ## Unreadable SRC paths shield their DST counterparts
 
 **Decision:** The walk returns the paths it could not read. An unreadable SRC or DST *root* fails the preview. For an unreadable SRC path below the root, every DST entry at or below the same relative path is left out of matching: it is neither deleted as an orphan nor claimed as a move source. The CLI prints these paths on stderr and exits 1.
@@ -285,7 +303,7 @@ All write calls are guarded with a content comparison and only write when the co
 
 ## Exit status is a contract
 
-**Decision:** `0` success, nothing to do or dry run; `1` finished, but files failed or paths could not be read; `2` usage error (bad flags, missing or invalid SRC/DST, unreadable `--config`); `3` fatal error, nothing could be planned or started; `130` cancelled with Ctrl-C, whichever phase the cancel lands in.
+**Decision:** `0` success, nothing to do or dry run; `1` finished, but files failed or paths could not be read; `2` usage error (bad flags, missing or invalid SRC/DST, unreadable `--config`, folders in use by another instance); `3` fatal error, nothing could be planned or started; `130` cancelled with Ctrl-C, whichever phase the cancel lands in.
 
 **Why:** scripts branch on it. A cancel during the walk used to surface as "Error: cancelled" with status 1, and a missing positional or a nested pair as 1 as well, so "some files were skipped" meant four different things.
 
