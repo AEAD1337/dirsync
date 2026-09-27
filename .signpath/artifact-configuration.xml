@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for the "windows" build artifact of
+  .github/workflows/release.yml. The artifact is a zip of dist/ holding the
+  two Windows binaries. Paste this into the artifact configuration of the
+  SignPath project (its slug goes into the SIGNPATH_ARTIFACT_CONFIGURATION
+  repository variable).
+
+  product-name pins the version-resource metadata SignPath requires to be
+  consistent: build.rs embeds ProductName "dirsync" and the Cargo.toml
+  version into both executables.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="dirsync.exe" product-name="dirsync">
+      <authenticode-sign />
+    </pe-file>
+    <pe-file path="dirsync-cli.exe" product-name="dirsync">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

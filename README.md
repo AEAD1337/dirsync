@@ -224,6 +224,7 @@ reads directly: no third-party coverage service and no upload token.
 - [Architecture](doc/architecture.md): module layout, data flow, and key design choices
 - [Design Decisions](doc/decisions.md): rationale behind non-obvious implementation choices
 - [GUI Protocol](doc/gui-protocol.md): WebSocket message format between the backend and Svelte frontend
+- [Code Signing Policy](CODE_SIGNING.md): how the Windows binaries are built, approved and signed
 
 ## License
 

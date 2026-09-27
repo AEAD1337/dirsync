@@ -988,6 +988,20 @@ fn embed_icon() {
     }
     let mut res = winres::WindowsResource::new();
     res.set_icon(icon.to_str().unwrap_or("assets/icon.ico"));
+    // winres fills ProductName and the versions from Cargo; the rest of the
+    // version resource is set explicitly. Code signing (CODE_SIGNING.md)
+    // requires consistent product metadata, and an executable without a
+    // description or copyright looks anonymous to heuristic scanners.
+    let description = std::env::var("CARGO_PKG_DESCRIPTION").unwrap_or_default();
+    let license = std::env::var("CARGO_PKG_LICENSE").unwrap_or_default();
+    res.set("FileDescription", &description);
+    res.set("CompanyName", "AEAD1337");
+    res.set(
+        "LegalCopyright",
+        &format!("Copyright (c) 2026 AEAD1337, {license}"),
+    );
+    res.set("OriginalFilename", "dirsync.exe");
+    res.set("InternalName", "dirsync");
     if let Err(e) = res.compile() {
         println!("cargo:warning=Failed to embed Windows icon: {e}");
     }
