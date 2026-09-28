@@ -49,7 +49,7 @@ export const licenses: LicenseEntry[] = [
   { name: "equivalent", version: "1.0.2", license: "Apache-2.0 OR MIT", copyright: "© 2016--2023", url: "https://github.com/indexmap-rs/equivalent" },
   { name: "errno", version: "0.3.14", license: "MIT OR Apache-2.0", copyright: "© 2014 Chris Wong", url: "https://github.com/lambda-fairy/rust-errno" },
   { name: "esm-env", version: "1.2.2", license: "MIT", copyright: "© 2022 Benjamin McCann", url: "https://github.com/benmccann/esm-env" },
-  { name: "esrap", version: "2.3.14", license: "MIT", copyright: "© 2023-2025 these people", url: "https://github.com/sveltejs/esrap" },
+  { name: "esrap", version: "2.4.0", license: "MIT", copyright: "© 2023-2025 these people", url: "https://github.com/sveltejs/esrap" },
   { name: "filetime", version: "0.2.29", license: "MIT/Apache-2.0", copyright: "© 2014 Alex Crichton", url: "https://github.com/alexcrichton/filetime" },
   { name: "form_urlencoded", version: "1.2.2", license: "MIT OR Apache-2.0", copyright: "© 2013-2016 The rust-url developers", url: "https://github.com/servo/rust-url" },
   { name: "futures-channel", version: "0.3.34", license: "MIT OR Apache-2.0", copyright: "© 2016 Alex Crichton", url: "https://github.com/rust-lang/futures-rs" },
