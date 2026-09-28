@@ -1002,9 +1002,9 @@ fn embed_icon() {
     let mut res = winres::WindowsResource::new();
     res.set_icon(icon.to_str().unwrap_or("assets/icon.ico"));
     // winres fills ProductName and the versions from Cargo; the rest of the
-    // version resource is set explicitly. Code signing (CODE_SIGNING.md)
-    // requires consistent product metadata, and an executable without a
-    // description or copyright looks anonymous to heuristic scanners.
+    // version resource is set explicitly: an executable without a
+    // description or copyright looks anonymous to heuristic scanners, and
+    // code signing services require consistent product metadata.
     let description = std::env::var("CARGO_PKG_DESCRIPTION").unwrap_or_default();
     let license = std::env::var("CARGO_PKG_LICENSE").unwrap_or_default();
     res.set("FileDescription", &description);

@@ -120,11 +120,9 @@ nobody spends time rediscovering them:
 - **The port is discoverable.** A local process can scan `127.0.0.1` and
   find the GUI and fetch its static page. Without the token it cannot call
   the API or open the WebSocket.
-- **No integrity signatures on release artifacts yet.** Binaries on the
-  rolling release are not code-signed until the SignPath Foundation
-  application is approved (see [CODE_SIGNING.md](CODE_SIGNING.md)), and the
-  tag is force-moved on every push to `main`, so a downloaded `rolling`
-  artifact is not a stable, verifiable point in time. Compare it with the
-  SHA-256 digest GitHub shows for the release asset, or build from source.
+- **No integrity signatures on release artifacts.** Binaries on the
+  rolling release are not code-signed, and the tag is force-moved on every
+  push to `main`, so a downloaded `rolling` artifact is not a stable,
+  verifiable point in time. Build from source if you need that.
 - **Third-party GitHub Actions are pinned to commit SHAs**; GitHub-owned
   actions are pinned to major version tags, which the vendor can move.

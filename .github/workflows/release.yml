@@ -22,7 +22,6 @@ on:
       - "make.ps1"
       - "make.sh"
       - ".github/badges/**"
-      - ".signpath/**"
   pull_request:
     branches: ["main"]
     paths-ignore:
@@ -34,7 +33,6 @@ on:
       - "make.ps1"
       - "make.sh"
       - ".github/badges/**"
-      - ".signpath/**"
 
 env:
   CARGO_TERM_COLOR: always
@@ -65,8 +63,6 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-build-windows-${{ github.ref }}
       cancel-in-progress: true
-    outputs:
-      artifact-id: ${{ steps.upload-windows.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -98,50 +94,10 @@ jobs:
         if: github.event_name != 'pull_request'
         run: Copy-Item target/release/dirsync.exe dist/dirsync-cli.exe
       - uses: actions/upload-artifact@v7
-        id: upload-windows
         if: github.event_name != 'pull_request'
         with:
           name: windows
           path: dist/
-          retention-days: 7
-
-  # Authenticode signing through SignPath Foundation (see CODE_SIGNING.md).
-  # Off until the repository variable SIGNPATH_ORGANIZATION_ID is set, so the
-  # workflow runs unchanged before the project is approved. The job hands
-  # SignPath this run's own unsigned artifact; SignPath checks its origin,
-  # waits for a manual approval, signs, and the signed files come back as
-  # the `windows-signed` artifact. Any failure here (rejected, not approved
-  # in time, service down) leaves the release to ship the unsigned build,
-  # exactly as before signing existed.
-  sign-windows:
-    needs: build-windows
-    if: github.event_name != 'pull_request' && vars.SIGNPATH_ORGANIZATION_ID != ''
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-    concurrency:
-      group: ${{ github.workflow }}-sign-windows-${{ github.ref }}
-      cancel-in-progress: true
-    steps:
-      - name: Submit signing request
-        # Pinned to a full commit SHA like the other third-party actions. v2.
-        uses: SignPath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION }}
-          github-artifact-id: ${{ needs.build-windows.outputs.artifact-id }}
-          wait-for-completion: true
-          # Every request needs a manual approval: allow an hour for it.
-          wait-for-completion-timeout-in-seconds: 3600
-          output-artifact-directory: signed/
-      - uses: actions/upload-artifact@v7
-        with:
-          name: windows-signed
-          path: signed/
           retention-days: 7
 
   test-and-build-linux:
@@ -315,18 +271,12 @@ jobs:
           retention-days: 7
 
   release:
-    needs: [build-windows, test-and-build-linux, sbom, sign-windows]
+    needs: [build-windows, test-and-build-linux, sbom]
     # build-windows and test-and-build-linux both run their compile checks
     # on pull requests too, so their success does not imply a push/dispatch
     # event: without this, a PR run would satisfy `needs` and this job would
-    # try to overwrite the rolling release before merge. `always()` keeps a
-    # skipped or failed sign-windows from blocking the release: it then
-    # ships the unsigned build. The three build jobs must still succeed.
-    if: >-
-      always() && github.event_name != 'pull_request' &&
-      needs.build-windows.result == 'success' &&
-      needs.test-and-build-linux.result == 'success' &&
-      needs.sbom.result == 'success'
+    # try to overwrite the rolling release before merge.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -341,12 +291,6 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: windows
-          path: artifacts/
-      # Signed binaries overwrite the unsigned ones of the same name.
-      - uses: actions/download-artifact@v8
-        if: needs.sign-windows.result == 'success'
-        with:
-          name: windows-signed
           path: artifacts/
       - uses: actions/download-artifact@v8
         with:
