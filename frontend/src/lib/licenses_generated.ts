@@ -146,7 +146,7 @@ export const licenses: LicenseEntry[] = [
   { name: "unicode-ident", version: "1.0.26", license: "(MIT OR Apache-2.0) AND Unicode-3.0", copyright: "© David Tolnay", url: "https://github.com/dtolnay/unicode-ident" },
   { name: "unicode-width", version: "0.2.2", license: "MIT OR Apache-2.0", copyright: "© 2015 The Rust Project Developers", url: "https://github.com/unicode-rs/unicode-width" },
   { name: "unit-prefix", version: "0.5.2", license: "MIT", copyright: "© 2024 Benjamin Sago, Fabio Valentini", url: "https://codeberg.org/commons-rs/unit-prefix" },
-  { name: "vite", version: "8.3.1", license: "MIT", copyright: "© 2019-present, VoidZero Inc. and Vite contributors", url: "https://vite.dev" },
+  { name: "vite", version: "8.3.2", license: "MIT", copyright: "© 2019-present, VoidZero Inc. and Vite contributors", url: "https://vite.dev" },
   { name: "walkdir", version: "2.5.0", license: "Unlicense/MIT", copyright: "© 2015 Andrew Gallant", url: "https://github.com/BurntSushi/walkdir" },
   { name: "wildmatch", version: "2.6.1", license: "MIT", copyright: "© 2020 Armin Becher", url: "https://github.com/becheran/wildmatch" },
   { name: "winapi-util", version: "0.1.11", license: "Unlicense OR MIT", copyright: "© 2017 Andrew Gallant", url: "https://github.com/BurntSushi/winapi-util" },
