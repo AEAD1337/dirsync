@@ -76,7 +76,7 @@ export const licenses: LicenseEntry[] = [
   { name: "is-wsl", version: "0.4.0", license: "MIT", copyright: "© 2023 Sean Larkin", url: "https://github.com/TheLarkInn/is-wsl" },
   { name: "itoa", version: "1.0.18", license: "MIT OR Apache-2.0", copyright: "© David Tolnay", url: "https://github.com/dtolnay/itoa" },
   { name: "lexopt", version: "0.3.2", license: "MIT", copyright: "© 2021 Jan Verbeek", url: "https://github.com/blyxxyz/lexopt" },
-  { name: "libc", version: "0.2.189", license: "MIT OR Apache-2.0", copyright: "© The Rust Project Developers", url: "https://github.com/rust-lang/libc" },
+  { name: "libc", version: "0.2.190", license: "MIT OR Apache-2.0", copyright: "© The Rust Project Developers", url: "https://github.com/rust-lang/libc" },
   { name: "locate-character", version: "3.0.0", license: "MIT", copyright: "© Rich Harris", url: "https://gitlab.com/Rich-Harris/locate-character#README" },
   { name: "lock_api", version: "0.4.14", license: "MIT OR Apache-2.0", copyright: "© 2016 The Rust Project Developers", url: "https://github.com/Amanieu/parking_lot" },
   { name: "log", version: "0.4.34", license: "MIT OR Apache-2.0", copyright: "© 2014 The Rust Project Developers", url: "https://github.com/rust-lang/log" },
