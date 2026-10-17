@@ -3,6 +3,9 @@
   import { licenses } from '../../lib/licenses_generated';
   const { onclose }: { onclose: () => void } = $props();
 
+  // Where every build's SBOMs (sbom-*.json) are published next to the binaries.
+  const RELEASE_URL = 'https://github.com/AEAD1337/dirsync/releases/tag/rolling';
+
   // Map SPDX license IDs to their canonical license text URLs.
   const SPDX_URLS: Record<string, string> = {
     'MIT':              'https://spdx.org/licenses/MIT.html',
@@ -86,6 +89,12 @@
         </div>
       {/each}
     </div>
+    <div class="dialog-footer">
+      Packages built into this program. The complete software bill of materials
+      (SBOM) of every build, build tools included, is published with the
+      <a href={RELEASE_URL} target="_blank" rel="noopener">rolling release on GitHub</a>
+      (<code>sbom-*.json</code>).
+    </div>
   </div>
 </div>
 
@@ -166,4 +175,15 @@
   .l-copy { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .l-link { color: var(--accent-blue); text-decoration: none; text-align: center; }
   .l-link:hover { text-decoration: underline; }
+  .dialog-footer {
+    flex-shrink: 0;
+    padding: 10px 20px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .dialog-footer a { color: var(--accent-blue); text-decoration: none; }
+  .dialog-footer a:hover { text-decoration: underline; }
+  .dialog-footer code { font-family: var(--font-mono); font-size: 11px; }
 </style>
