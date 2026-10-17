@@ -414,7 +414,7 @@
       Cancel
     </button>
     {#if status !== 'idle' || previewing || running}
-      {@const displayStatus = (status === 'idle' && previewing) ? 'previewing' : (status === 'idle' && running) ? 'running' : status}
+      {const displayStatus = (status === 'idle' && previewing) ? 'previewing' : (status === 'idle' && running) ? 'running' : status}
       <span class="status-badge status-{displayStatus}">{displayStatus}</span>
     {/if}
   </div>

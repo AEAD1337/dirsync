@@ -106,7 +106,7 @@ case "$ACTION" in
             printf '\n' >> "$out"
             count=$((count + 1))
         done < <(cd "$root" && find . -type f \( -name '*.rs' -o -name '*.ts' -o -name '*.svelte' \) \
-            -not -path '*/target/*' -not -path '*/node_modules/*' \
+            -not -path '*/target/*' -not -path '*/node_modules/*' -not -path '*/.svelte-check/*' \
             -not -name 'licenses_generated.ts' -print0 | LC_ALL=C sort -z)
         echo -e "${CYAN}Bundled $count files -> bundle.txt${NC}"
         ;;
@@ -114,7 +114,7 @@ case "$ACTION" in
         loc_files() {
             find . -type f \
                 | sed 's|^\./||' \
-                | grep -Ev '^(target|node_modules|\.git|\.claude)/|/(target|node_modules|dist)/'
+                | grep -Ev '^(target|node_modules|\.git|\.claude)/|/(target|node_modules|dist|\.svelte-check)/'
         }
 
         # Counts code/comment/blank lines the way cloc does: a line is a comment only

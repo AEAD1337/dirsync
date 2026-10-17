@@ -5,6 +5,7 @@
 use dirsync::sync::matcher::{MatchOutput, MatchResult, MatchedEntry, OrphanEntry, RenamedDir};
 use dirsync::sync::planner::{SyncOp, SyncPlan, plan};
 use dirsync::sync::walker::FileEntry;
+use std::assert_matches;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -117,7 +118,7 @@ fn a_retargeted_symlink_becomes_a_symlink_op_not_an_overwrite() {
 
     let plan = run(out, &[], &[]);
 
-    assert!(matches!(plan.ops.as_slice(), [SyncOp::Symlink { .. }]));
+    assert_matches!(plan.ops.as_slice(), [SyncOp::Symlink { .. }]);
     assert_eq!(plan.overwrite_count, 0);
 }
 
@@ -160,7 +161,7 @@ fn an_orphan_whose_path_a_write_op_claims_is_not_deleted() {
     let plan = run(out, &[], &[]);
 
     assert_eq!(plan.delete_count, 0);
-    assert!(matches!(plan.ops.as_slice(), [SyncOp::Copy { .. }]));
+    assert_matches!(plan.ops.as_slice(), [SyncOp::Copy { .. }]);
 }
 
 #[test]
@@ -334,10 +335,10 @@ fn a_case_renamed_entry_is_not_also_counted_as_identical() {
     // The CaseRename is the whole job; counting the file as identical too
     // reported it twice in the summary.
     assert_eq!(plan.identical_count, 0);
-    assert!(matches!(
+    assert_matches!(
         plan.ops.as_slice(),
         [SyncOp::CaseRename { is_dir: false, .. }]
-    ));
+    );
 }
 
 #[test]
@@ -352,10 +353,7 @@ fn a_move_that_only_changes_case_is_a_plain_move_on_a_case_sensitive_dst() {
 
     let plan = run(out, &[], &[]);
 
-    assert!(matches!(
-        plan.ops.as_slice(),
-        [SyncOp::Move { is_dir: false, .. }]
-    ));
+    assert_matches!(plan.ops.as_slice(), [SyncOp::Move { is_dir: false, .. }]);
 }
 
 // --- Skipping directories from the GUI ---

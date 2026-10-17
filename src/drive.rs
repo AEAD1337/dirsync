@@ -157,9 +157,9 @@ unsafe fn query_property<T>(
         DeviceIoControl(
             handle,
             IOCTL_STORAGE_QUERY_PROPERTY,
-            Some(&query as *const _ as *const std::ffi::c_void),
+            Some((&raw const query).cast()),
             mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(&mut output as *mut _ as *mut std::ffi::c_void),
+            Some((&raw mut output).cast()),
             mem::size_of::<T>() as u32,
             Some(&mut returned),
             None,

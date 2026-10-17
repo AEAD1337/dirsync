@@ -4,6 +4,8 @@ reviews/
 target/
 frontend/node_modules/
 frontend/dist/
+# svelte-check --incremental cache (holds generated .ts files)
+frontend/.svelte-check/
 frontend/.build-profile
 *.toml.tmp
 .DS_Store

@@ -1068,7 +1068,7 @@ pub(crate) mod junction {
             GetFileInformationByHandleEx(
                 handle,
                 FileAttributeTagInfo,
-                (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                (&raw mut info).cast(),
                 std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
             )
         }

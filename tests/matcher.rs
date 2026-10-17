@@ -1,5 +1,6 @@
 use dirsync::progress::{LogLevel, ProgressEvent, new_progress_channel};
 use dirsync::sync::{matcher::MatchResult, matcher::match_trees, walker::FileEntry};
+use std::assert_matches;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -134,7 +135,7 @@ fn symlink_with_an_unchanged_target_is_identical() {
         &[symlink_entry("link", "target.txt")],
     );
 
-    assert!(matches!(result_for(&out, "link"), MatchResult::Identical));
+    assert_matches!(result_for(&out, "link"), MatchResult::Identical);
     assert!(out.orphans.is_empty());
 }
 
@@ -147,10 +148,10 @@ fn symlink_with_a_retargeted_link_is_rewritten() {
 
     // Not a Copy: the planner turns this into a Symlink op that replaces the
     // link in place.
-    assert!(matches!(
+    assert_matches!(
         result_for(&out, "link"),
         MatchResult::SamePathDifferentContent
-    ));
+    );
     assert!(out.orphans.is_empty());
 }
 
@@ -158,7 +159,7 @@ fn symlink_with_a_retargeted_link_is_rewritten() {
 fn symlink_missing_from_dst_is_new() {
     let out = match_all(&[symlink_entry("link", "target.txt")], &[]);
 
-    assert!(matches!(result_for(&out, "link"), MatchResult::NewInSrc));
+    assert_matches!(result_for(&out, "link"), MatchResult::NewInSrc);
 }
 
 #[test]
@@ -175,10 +176,10 @@ fn symlink_landing_on_a_regular_dst_file_replaces_it() {
     // SamePathDifferentContent, so the planner emits a Symlink op: the
     // executor clears the regular file first. A NewInSrc would emit a Copy
     // and try to write through the path instead.
-    assert!(matches!(
+    assert_matches!(
         result_for(&out, "link"),
         MatchResult::SamePathDifferentContent
-    ));
+    );
 }
 
 #[test]
@@ -203,8 +204,8 @@ fn symlinks_and_regular_files_are_matched_independently() {
         &[symlink_entry("stale", "gone")],
     );
 
-    assert!(matches!(result_for(&out, "a.txt"), MatchResult::NewInSrc));
-    assert!(matches!(result_for(&out, "link"), MatchResult::NewInSrc));
+    assert_matches!(result_for(&out, "a.txt"), MatchResult::NewInSrc);
+    assert_matches!(result_for(&out, "link"), MatchResult::NewInSrc);
     assert_eq!(orphan_paths(&out), vec!["stale"]);
 }
 
@@ -247,10 +248,10 @@ fn files_nested_deep_inside_a_renamed_directory_match_by_path() {
 
     // The file is two levels below the renamed directory: the ancestor walk
     // has to climb past `new/sub` before it finds `new`.
-    assert!(matches!(
+    assert_matches!(
         result_for(&out, "new/sub/payload.bin"),
         MatchResult::Identical
-    ));
+    );
     assert!(
         out.orphans.is_empty(),
         "the dir move carries its contents: {:?}",
@@ -285,10 +286,7 @@ fn symlinks_inside_a_renamed_directory_travel_with_it() {
     );
 
     assert_eq!(out.renamed_dirs.len(), 1);
-    assert!(matches!(
-        result_for(&out, "new/link"),
-        MatchResult::Identical
-    ));
+    assert_matches!(result_for(&out, "new/link"), MatchResult::Identical);
     assert!(
         out.orphans.is_empty(),
         "the DST symlink is claimed by the rename: {:?}",
@@ -321,10 +319,7 @@ fn empty_files_are_never_matched_as_moves() {
     );
 
     // Every empty file hashes the same, so a move match would be arbitrary.
-    assert!(matches!(
-        result_for(&out, "new-name"),
-        MatchResult::NewInSrc
-    ));
+    assert_matches!(result_for(&out, "new-name"), MatchResult::NewInSrc);
     assert_eq!(orphan_paths(&out), vec!["old-name"]);
 }
 

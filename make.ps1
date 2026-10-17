@@ -169,7 +169,7 @@ switch ($Action) {
     "bundle" {
         $out = Join-Path $PSScriptRoot "bundle.txt"
         $files = Get-ChildItem -Path $PSScriptRoot -Recurse -Include *.rs, *.ts, *.svelte `
-            | Where-Object { $_.FullName -notmatch '\\(target|node_modules)\\' } `
+            | Where-Object { $_.FullName -notmatch '\\(target|node_modules|\.svelte-check)\\' } `
             | Where-Object { $_.Name -ne "licenses_generated.ts" } `
             | Sort-Object FullName
         $sb = [System.Text.StringBuilder]::new()
@@ -193,7 +193,7 @@ switch ($Action) {
         }
 
         $candidates = Get-ChildItem -Path $root -Recurse -File `
-            | Where-Object { $_.FullName -notmatch '\\(target|node_modules|dist|\.git|\.claude)\\' }
+            | Where-Object { $_.FullName -notmatch '\\(target|node_modules|dist|\.git|\.claude|\.svelte-check)\\' }
 
         foreach ($file in $candidates) {
             $rel = $file.FullName.Substring($root.Length + 1).Replace('\', '/')

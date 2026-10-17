@@ -208,18 +208,19 @@
       <!-- Top spacer keeps the scrollbar thumb at the correct position. -->
       <div style="padding-top: {topPad}px">
         {#each visibleRows as row, i (firstVisible + i)}
+          {const index = firstVisible + i}
           {#if row === null}
             <div class="tree-gap"></div>
           {:else if row.rowType === 'dir'}
             <div
               class="tree-dir"
               class:dir-active={$activeDirs.has(row.path)}
-              class:row-focused={firstVisible + i === focusedIndex}
+              class:row-focused={index === focusedIndex}
               style="padding-left: {8 + row.depth * 16}px"
               role="button"
               tabindex="0"
-              onclick={() => { onselect({ index: firstVisible + i }); toggleDir(row.path); }}
-              onkeydown={(e) => onRowKey(e, firstVisible + i, row.path)}
+              onclick={() => { onselect({ index }); toggleDir(row.path); }}
+              onkeydown={(e) => onRowKey(e, index, row.path)}
               oncontextmenu={(e) => onContextMenu(e, row.path)}
             >
               <span class="dir-chevron" class:collapsed={$collapsedDirs.has(row.path)}>▾</span>
@@ -229,17 +230,17 @@
               {/if}
             </div>
           {:else}
-            {@const error = $opErrors.get(row.path)}
+            {const error = $opErrors.get(row.path)}
             <div
               class="tree-row"
               class:has-error={!!error}
-              class:row-focused={firstVisible + i === focusedIndex}
+              class:row-focused={index === focusedIndex}
               style="padding-left: {8 + row.depth * 16}px"
               title={rowTooltip(row, error)}
               role="button"
               tabindex="0"
-              onclick={() => onselect({ index: firstVisible + i })}
-              onkeydown={(e) => onRowKey(e, firstVisible + i, null)}
+              onclick={() => onselect({ index })}
+              onkeydown={(e) => onRowKey(e, index, null)}
               oncontextmenu={(e) => onContextMenu(e, row.path)}
             >
               <span class="badge {badgeClass(row.op.badge)}">{row.op.badge}</span>
