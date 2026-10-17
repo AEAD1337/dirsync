@@ -176,11 +176,15 @@ pub async fn start(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
     let url = format!("http://{addr}/#t={token}");
     println!("dirsync GUI running at {url}");
 
-    // Open browser in background
+    // Open the browser in the background. `that_detached` with open's
+    // `shellexecute-on-windows` feature calls ShellExecuteExW directly:
+    // `open::that` starts a hidden PowerShell and waits for it (about
+    // 300 ms on a worker thread), and fails where PowerShell is blocked.
     let url2 = url.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if let Err(e) = open::that(&url2) {
+        let opened = tokio::task::spawn_blocking(move || open::that_detached(&url2)).await;
+        if let Ok(Err(e)) = opened {
             eprintln!("Could not open browser: {e}");
         }
     });

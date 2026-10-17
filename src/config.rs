@@ -60,20 +60,14 @@ impl Default for AppConfig {
 
 /// Decode config bytes: UTF-8 (with or without BOM) or UTF-16 with a BOM,
 /// which is what Windows PowerShell 5.1's `>` and `Out-File` write.
+/// An odd byte count in UTF-16 is a cut-off file and fails to decode.
 fn decode(bytes: &[u8]) -> Option<String> {
-    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
-        let units: Vec<u16> = rest
-            .chunks(2)
-            .map(|c| unit([c[0], *c.get(1).unwrap_or(&0)]))
-            .collect();
-        String::from_utf16(&units).ok()
-    };
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         String::from_utf8(rest.to_vec()).ok()
     } else if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        utf16(rest, u16::from_le_bytes)
+        String::from_utf16le(rest).ok()
     } else if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        utf16(rest, u16::from_be_bytes)
+        String::from_utf16be(rest).ok()
     } else {
         String::from_utf8(bytes.to_vec()).ok()
     }

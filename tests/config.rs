@@ -164,3 +164,21 @@ fn concurrent_saves_to_one_path_all_succeed() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+#[test]
+fn a_truncated_utf16_file_is_treated_as_broken() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    // One byte short of a whole UTF-16 code unit: the file was cut off.
+    let mut bytes = utf16le_with_bom("port = 8080\r\n");
+    bytes.pop();
+    std::fs::write(&path, &bytes).unwrap();
+
+    // A cut-off file must not be completed by guessing the missing byte.
+    assert!(AppConfig::load_explicit(&path).is_err());
+    assert_eq!(AppConfig::load_from(&path).port, 7373);
+    assert_eq!(
+        std::fs::read(dir.path().join("config.toml.bad")).unwrap(),
+        bytes
+    );
+}

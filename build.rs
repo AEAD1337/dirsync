@@ -20,7 +20,6 @@ fn main() {
     println!("cargo:rerun-if-changed=frontend/index.html");
     println!("cargo:rerun-if-changed=frontend/package.json");
     println!("cargo:rerun-if-changed=frontend/tsconfig.json");
-    println!("cargo:rerun-if-changed=frontend/svelte.config.js");
     // Vite copies frontend/public into dist verbatim (favicons), so a change
     // there alone must re-run Vite as well.
     println!("cargo:rerun-if-changed=frontend/public");

@@ -1604,3 +1604,41 @@ async fn test_disjoint_move_cycles_and_a_chain_in_one_plan() {
     assert!(!dst.path().join("f.txt").exists());
     assert!(staging_litter(dst.path()).is_empty());
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn touch_mtime_works_while_another_program_holds_the_file_open() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let s = src.path().join("a.txt");
+    let d = dst.path().join("a.txt");
+    fs::write(&s, b"same").unwrap();
+    fs::write(&d, b"same").unwrap();
+    let past = std::time::SystemTime::now() - Duration::from_secs(3600);
+    filetime::set_file_mtime(&s, filetime::FileTime::from_system_time(past)).unwrap();
+    // A viewer or indexer that opened the file sharing only reads: opening
+    // it for full write access, as a metadata write used to, fails with a
+    // sharing violation (os error 32).
+    let _held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1) // FILE_SHARE_READ
+        .open(&d)
+        .unwrap();
+
+    let plan = bare_plan(
+        dst.path().to_path_buf(),
+        vec![SyncOp::TouchMtime {
+            src: s.clone(),
+            dst: d.clone(),
+        }],
+    );
+    let log = run_plan(plan, false).await;
+
+    let errors: Vec<_> = log.iter().map(|e| e.message.clone()).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(
+        fs::metadata(&d).unwrap().modified().unwrap(),
+        fs::metadata(&s).unwrap().modified().unwrap()
+    );
+}

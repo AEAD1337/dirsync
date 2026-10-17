@@ -2,7 +2,6 @@ use super::planner::{LinkKind, OP_TOKEN_BYTES, SyncOp, SyncPlan};
 use crate::error::SkipLog;
 use crate::progress::{ProgressEvent, ProgressState, SyncStatus};
 use anyhow::Result;
-use filetime::{FileTime, set_file_mtime};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -49,8 +48,8 @@ fn clear_symlink_at(dst: &Path) -> std::io::Result<()> {
 
 /// Clear the Windows readonly attribute on an existing regular file. A
 /// readonly DST file (mirrored from a readonly SRC file) otherwise fails
-/// every later rename onto it and every mtime write with "Access is denied".
-/// Unix readonly modes block neither for the owner, so this is Windows-only.
+/// every later rename onto it with "Access is denied". Unix readonly modes
+/// do not block that for the owner, so this is Windows-only.
 #[cfg(windows)]
 fn clear_readonly(path: &Path) -> std::io::Result<bool> {
     match fs::symlink_metadata(path) {
@@ -71,17 +70,13 @@ fn clear_readonly(_path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
-/// Run `f` against `path` with its readonly attribute lifted, restoring it
-/// afterwards (TouchMtime on a readonly mirror).
-fn with_writable<T>(path: &Path, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
-    let was_readonly = clear_readonly(path)?;
-    let result = f();
-    if was_readonly {
-        let mut perms = fs::metadata(path)?.permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(path, perms)?;
-    }
-    result
+/// Set `path`'s modification time. `fs::set_times` asks only for the right
+/// to change attributes (Windows) or works by path (Unix), so it succeeds on
+/// a readonly file and on one another program holds open with read-only
+/// sharing, where opening the file for writing, as the `filetime` crate
+/// does, fails with "Access is denied" or a sharing violation.
+fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
+    fs::set_times(path, fs::FileTimes::new().set_modified(mtime))
 }
 
 /// Stage a copy of `src` via `write` (which fills the staging path it is
@@ -110,9 +105,8 @@ pub(crate) fn stage_and_commit(
         if after.len() != before.len() || after.modified().ok() != before.modified().ok() {
             anyhow::bail!("source changed during copy; not committed, the next run retries it");
         }
-        clear_readonly(&tmp)?;
         if let Ok(mtime) = before.modified() {
-            set_file_mtime(&tmp, FileTime::from_system_time(mtime))?;
+            set_mtime(&tmp, mtime)?;
         }
         fs::set_permissions(&tmp, before.permissions())?;
         clear_symlink_at(dst)?;
@@ -840,11 +834,8 @@ async fn execute_op(
 
         SyncOp::TouchMtime { src, dst } => {
             if !dry_run {
-                let meta = fs::metadata(&src)?;
-                let mtime = meta.modified()?;
-                with_writable(&dst, || {
-                    set_file_mtime(&dst, FileTime::from_system_time(mtime))
-                })?;
+                let mtime = fs::metadata(&src)?.modified()?;
+                set_mtime(&dst, mtime)?;
             }
             Ok(format!("touch-mtime {}", dst.display()))
         }

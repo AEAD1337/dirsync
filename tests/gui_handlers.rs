@@ -804,3 +804,43 @@ async fn a_run_whose_dst_another_window_took_since_the_preview_is_refused() {
     assert!(msg.contains("in use by another dirsync"), "{msg}");
     assert!(!dst.join("new").exists());
 }
+
+#[tokio::test]
+async fn static_assets_are_served_with_their_content_types() {
+    let content_type = |resp: axum::response::Response| {
+        resp.headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default()
+    };
+    let index = static_handler("/".parse().unwrap()).await.into_response();
+    assert_eq!(content_type(index), "text/html");
+
+    // The bundle's file names are hashed: find the script through index.html.
+    let html = String::from_utf8(
+        axum::body::to_bytes(
+            static_handler("/index.html".parse().unwrap())
+                .await
+                .into_response()
+                .into_body(),
+            1 << 20,
+        )
+        .await
+        .unwrap()
+        .to_vec(),
+    )
+    .unwrap();
+    let script = html
+        .split('"')
+        .find(|s| s.starts_with("/assets/") && s.ends_with(".js"))
+        .expect("index.html references its script");
+    let js = static_handler(script.parse().unwrap())
+        .await
+        .into_response();
+    assert!(content_type(js).contains("javascript"), "{script}");
+
+    let svg = static_handler("/favicon.svg".parse().unwrap())
+        .await
+        .into_response();
+    assert_eq!(content_type(svg), "image/svg+xml");
+}

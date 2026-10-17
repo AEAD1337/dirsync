@@ -313,7 +313,6 @@ dependencies = [
  "getrandom 0.3.4",
  "indicatif",
  "lexopt",
- "mime_guess",
  "open",
  "rayon",
  "rust-embed",
@@ -330,6 +329,12 @@ dependencies = [
  "windows",
  "winres",
 ]
+
+[[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "either"
@@ -753,6 +758,7 @@ version = "5.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa576c76302b7b808eecc68061e67336c47833ef9d22caa74dda10fa9675eebc"
 dependencies = [
+ "dunce",
  "is-wsl",
  "libc",
 ]
@@ -942,6 +948,7 @@ version = "8.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d84e8ba78bd384263e5922f084cbe1b081c3b7e69add59c8fb097b879ba968a"
 dependencies = [
+ "mime_guess",
  "sha2",
  "walkdir",
 ]

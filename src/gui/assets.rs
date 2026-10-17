@@ -20,10 +20,13 @@ pub async fn static_handler(uri: Uri) -> impl IntoResponse {
     }
 
     match Assets::get(path) {
+        // The MIME type is worked out at compile time by rust-embed's
+        // `mime-guess` feature; looking it up at run time linked about 110 KB
+        // of extension tables into the binary.
         Some(content) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            let mime = content.metadata.mimetype().to_owned();
             Response::builder()
-                .header(header::CONTENT_TYPE, mime.as_ref())
+                .header(header::CONTENT_TYPE, mime)
                 .body(Body::from(content.data.into_owned()))
                 .unwrap()
                 .into_response()

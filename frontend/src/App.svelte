@@ -9,9 +9,10 @@
   import LogModal from './components/dialogs/LogModal.svelte';
   import { api, ApiError, SyncWebSocket, isAuthError } from './lib/api';
   import { getToken } from './lib/auth';
+  import { announce } from './lib/announce';
   import {
     config, src, dst, progress, ops, opErrors, isDark, scanState, scanProgress, collapsedDirs,
-    activeDirs, planMeta, pathSep, unauthorized, EMPTY_PLAN_META,
+    activeDirs, planMeta, pathSep, unauthorized, EMPTY_PLAN_META, fmtCount, formatBytes,
   } from './lib/store';
   import { buildDisplayRows, mergeRows, sortOps, ROW_HEIGHT, type PlanOp } from './lib/treeUtils';
   import {
@@ -302,6 +303,8 @@
     flushCompleted();
     flushErrors();
     const failed = get(opErrors);
+    const failures = failed.size === 0 ? '' : `, ${fmtCount(failed.size)} failed`;
+    announce(cancelled ? `Sync cancelled${failures}.` : `Sync finished${failures}.`);
     const done = completed;
     ops.update(list => list.filter(op => failed.has(op.rel_path) || (cancelled && !done.has(op.rel_path))));
     completed = new Set();
@@ -417,6 +420,9 @@
         driveMode = e.hdd ? 'hdd' : 'ssd';
         break;
       case 'plan_ready':
+        announce(e.total_ops === 0
+          ? 'Preview ready: nothing to sync.'
+          : `Preview ready: ${fmtCount(e.total_ops)} operations, ${formatBytes(e.total_bytes)} to transfer.`);
         applyPlan(e);
         clearErrors();
         resetScan();
@@ -813,6 +819,8 @@
   }
 
   :global(.dark) {
+    /* Native scrollbars and form controls follow the theme too. */
+    color-scheme: dark;
     --bg: #1a1a1a;
     --surface: #242424;
     --header-bg: #1e1e1e;

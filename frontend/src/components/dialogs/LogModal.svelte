@@ -155,6 +155,11 @@
   }
 
   .entry {
+    /* Up to 2000 entries and no virtualisation: let the browser skip laying
+       out the ones scrolled out of view (the size is an estimate until an
+       entry is first drawn). */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 22px;
     padding: 2px 16px;
     white-space: pre-wrap;
     word-break: break-all;
