@@ -190,11 +190,11 @@ jobs:
         with:
           node-version: "24"
       # Third-party action pinned to a full commit SHA: a tag can be moved to
-      # point at different code, a commit SHA cannot. v2.87.5. It downloads
+      # point at different code, a commit SHA cannot. v2.87.29. It downloads
       # the prebuilt release and checks it against the SHA-256 recorded in
       # the action's manifest; `fallback: none` makes a missing manifest
       # entry fail the job instead of silently installing an unverified build.
-      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-cyclonedx@${{ env.CARGO_CYCLONEDX_VERSION }}
           fallback: none

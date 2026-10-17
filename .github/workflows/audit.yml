@@ -32,8 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Third-party action pinned to a full commit SHA: a tag can be moved to
-      # point at different code, a commit SHA cannot. v2.87.5.
-      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8
+      # point at different code, a commit SHA cannot. v2.87.29.
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-audit
       # Plain `cargo audit` fails on vulnerabilities only. Unmaintained and
