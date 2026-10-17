@@ -1642,3 +1642,65 @@ async fn touch_mtime_works_while_another_program_holds_the_file_open() {
         fs::metadata(&s).unwrap().modified().unwrap()
     );
 }
+
+// --- Parallel small copies report completions as they happen ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn small_copies_report_each_completion_while_the_phase_still_runs() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let ops: Vec<SyncOp> = (0..200)
+        .map(|i| {
+            let name = format!("f{i:03}.txt");
+            fs::write(src.path().join(&name), b"payload").unwrap();
+            SyncOp::Copy {
+                src: src.path().join(&name),
+                dst: dst.path().join(&name),
+                size: 7,
+                hash: None,
+            }
+        })
+        .collect();
+    let plan = bare_plan(dst.path().to_path_buf(), ops);
+
+    let (progress, mut rx) = new_progress_channel();
+    let (pause_tx, pause_rx) = watch::channel(false);
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    // Pause on the first completion, resume once the run reports Paused.
+    // Completions held back until every copy had been started made the
+    // first one arrive too late to pause anything: the whole phase then
+    // ran unpaused, and 20,000 of them at once overran the event channel.
+    let watcher = tokio::spawn(async move {
+        let mut paused_mid_phase = false;
+        while let Ok(ev) = rx.recv().await {
+            match ev {
+                dirsync::progress::ProgressEvent::OpDone { .. } if !paused_mid_phase => {
+                    pause_tx.send_replace(true);
+                }
+                dirsync::progress::ProgressEvent::StatusChanged {
+                    status: SyncStatus::Paused,
+                } => {
+                    paused_mid_phase = true;
+                    pause_tx.send_replace(false);
+                }
+                dirsync::progress::ProgressEvent::StatusChanged {
+                    status: SyncStatus::Done,
+                } => break,
+                _ => {}
+            }
+        }
+        paused_mid_phase
+    });
+    let opts = ExecuteOptions {
+        dry_run: false,
+        hdd: false,
+    };
+    let log = execute(plan, progress.clone(), opts, pause_rx, cancel_rx).await;
+
+    assert!(log.is_empty());
+    assert_eq!(fs::read_dir(dst.path()).unwrap().count(), 200);
+    assert!(
+        watcher.await.unwrap(),
+        "completions arrived only after the phase"
+    );
+}

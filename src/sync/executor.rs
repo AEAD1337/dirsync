@@ -433,6 +433,15 @@ pub async fn execute(
         let mut tasks: JoinSet<(PathBuf, Result<String>)> = JoinSet::new();
 
         for op in small_copies {
+            // Report the copies that finished so far before starting the
+            // next one. Holding every completion until all copies had been
+            // started emitted them in one burst at the end of the phase
+            // (20,000 events for 20,000 files), which overran the progress
+            // channel: rows did not tick off, the op counter stood still,
+            // and every WebSocket client logged hundreds of "dropped" lines.
+            while let Some(finished) = tasks.try_join_next() {
+                report_small_copy(finished, &progress, &mut skip_log);
+            }
             if *cancel_rx.borrow() {
                 break;
             }
@@ -453,24 +462,8 @@ pub async fn execute(
 
         // Drain: we always wait for all in-flight copies even if cancelled,
         // since spawn_blocking cannot be safely aborted mid-write.
-        while let Some(join_result) = tasks.join_next().await {
-            let (path, result) = join_result.expect("copy task panicked");
-            match result {
-                Ok(summary) => {
-                    progress.ops_done.fetch_add(1, Ordering::Relaxed);
-                    progress.emit(ProgressEvent::OpDone {
-                        summary,
-                        path: path.to_string_lossy().into_owned(),
-                    });
-                }
-                Err(e) => {
-                    skip_log.push(path.clone(), e.to_string());
-                    progress.emit(ProgressEvent::FileError {
-                        name: path.display().to_string(),
-                        message: e.to_string(),
-                    });
-                }
-            }
+        while let Some(finished) = tasks.join_next().await {
+            report_small_copy(finished, &progress, &mut skip_log);
         }
 
         if *cancel_rx.borrow() {
@@ -507,6 +500,32 @@ pub async fn execute(
         SyncStatus::Done
     };
     set_status(skip_log, status, &progress)
+}
+
+/// Account for one finished parallel small copy: count it and announce it,
+/// or log its failure.
+fn report_small_copy(
+    finished: Result<(PathBuf, Result<String>), tokio::task::JoinError>,
+    progress: &Arc<ProgressState>,
+    skip_log: &mut SkipLog,
+) {
+    let (path, result) = finished.expect("copy task panicked");
+    match result {
+        Ok(summary) => {
+            progress.ops_done.fetch_add(1, Ordering::Relaxed);
+            progress.emit(ProgressEvent::OpDone {
+                summary,
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+        Err(e) => {
+            skip_log.push(path.clone(), e.to_string());
+            progress.emit(ProgressEvent::FileError {
+                name: path.display().to_string(),
+                message: e.to_string(),
+            });
+        }
+    }
 }
 
 /// What every serial phase needs to run its ops.
