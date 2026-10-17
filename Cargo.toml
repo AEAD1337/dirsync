@@ -1,6 +1,6 @@
 [package]
 name = "dirsync"
-version = "1.1.7"
+version = "1.1.8"
 edition = "2024"
 # std::fs::set_times (executor: mtime writes on readonly and shared files).
 rust-version = "1.99"
