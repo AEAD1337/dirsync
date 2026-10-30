@@ -48,9 +48,12 @@ fn bash_candidates(dir: &std::path::Path, words: &[&str]) -> Option<Vec<String>>
         quoted.join(" "),
         words.len() - 1
     );
+    // The driver goes in a file, not `bash -c`: on Windows `Command` finds
+    // System32's WSL launcher before PATH, and it expands `$` references in
+    // its command line before the inner bash runs, emptying COMPREPLY.
+    std::fs::write(dir.join("driver.sh"), driver).unwrap();
     let out = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(driver)
+        .arg("driver.sh")
         .current_dir(dir)
         .output()
         .ok()?;

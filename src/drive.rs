@@ -188,9 +188,10 @@ fn trim_support(drive: char) -> Option<bool> {
 #[cfg(not(windows))]
 fn detect(path: &Path) -> DriveKind {
     use sysinfo::{DiskKind, Disks};
-    let disks = Disks::new_with_refreshed_list();
+    let Ok(disks) = Disks::new_with_refreshed_list() else {
+        return DriveKind::Unknown;
+    };
     let best = disks
-        .list()
         .iter()
         .filter(|d| path.starts_with(d.mount_point()))
         .max_by_key(|d| d.mount_point().components().count());

@@ -40,7 +40,7 @@ fn main() {
 
     // Embed icon into the Windows executable
     // Not under cfg(test): tests/build_licenses.rs compiles this file as a
-    // module, and winres is a build-dependency the test crate cannot see.
+    // module, and winresource is a build-dependency the test crate cannot see.
     #[cfg(all(windows, not(test)))]
     embed_icon();
 
@@ -998,10 +998,10 @@ fn embed_icon() {
         println!("cargo:warning=assets/icon.ico not found - skipping icon embedding");
         return;
     }
-    let mut res = winres::WindowsResource::new();
+    let mut res = winresource::WindowsResource::new();
     res.set_icon(icon.to_str().unwrap_or("assets/icon.ico"));
-    // winres fills ProductName and the versions from Cargo; the rest of the
-    // version resource is set explicitly: an executable without a
+    // winresource fills ProductName and the versions from Cargo; the rest of
+    // the version resource is set explicitly: an executable without a
     // description or copyright looks anonymous to heuristic scanners, and
     // code signing services require consistent product metadata.
     let description = std::env::var("CARGO_PKG_DESCRIPTION").unwrap_or_default();
