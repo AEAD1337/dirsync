@@ -195,8 +195,15 @@ impl ProgressState {
     /// [`speed_mbps`](Self::speed_mbps) measured at `now`. The window is
     /// trimmed and closed against the clock rather than against the newest
     /// sample, so a stalled copy decays to 0 instead of freezing speed and
-    /// ETA at the last values it had while bytes were still arriving.
+    /// ETA at the last values it had while bytes were still arriving. Once
+    /// the run stops, the clock stops with it: the final speed stays on
+    /// screen like the elapsed time does.
     pub fn speed_mbps_at(&self, now: Instant) -> f64 {
+        let now = self
+            .stopped_at
+            .lock()
+            .unwrap()
+            .map_or(now, |end| now.min(end));
         let mut ring = self.speed_ring.lock().unwrap();
         trim_speed_ring(&mut ring, now);
         if ring.len() < 2 {
@@ -256,7 +263,12 @@ impl ProgressState {
         }
     }
 
+    /// `None` once the run has stopped: a finished run has nothing left, and a
+    /// cancelled one has no arrival time to count down to.
     pub fn eta_secs(&self) -> Option<u64> {
+        if self.stopped_at.lock().unwrap().is_some() {
+            return None;
+        }
         let speed = self.speed_mbps();
         if speed < 0.001 {
             return None;
