@@ -48,8 +48,8 @@ jobs:
   # from any branch), so only the newest run publishes `rolling`: a slower
   # older run can no longer delete it and republish older binaries. Putting
   # this at the workflow level instead would also cancel an older release
-  # job halfway between `gh release delete` and `gh release create`, leaving
-  # no rolling release until the newer run's builds finished.
+  # job halfway through swapping its draft in for the published release,
+  # leaving no rolling release until the newer run's builds finished.
   build-windows:
     # Test and the compile checks (Build, Build CLI-only) run on every PR so a
     # Windows-only #[cfg(windows)] regression cannot hide behind a
@@ -309,13 +309,21 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 5
           command: |
-            # The tag is created through the API (--cleanup-tag on delete,
-            # --target on create), never by `git push`: GITHUB_TOKEN belongs
-            # to a GitHub App, and pushing a ref whose tree carries
-            # .github/workflows/ is rejected without a `workflows` scope that
-            # the token cannot be granted. Deleting release and tag together
-            # also stops a retry from finding a stale tag with no release.
-            gh release delete rolling --yes --cleanup-tag || true
+            # The action runs this through plain `bash -c`: without -e, only
+            # the last command's status would decide whether an attempt failed.
+            set -euo pipefail
+            # The new release is built as a draft and swapped in only once
+            # every asset is up, so a failed upload leaves the previous
+            # release published instead of none. A draft creates no tag, so
+            # until the swap it carries a placeholder tag name of its own.
+            draft="rolling-draft-$GITHUB_RUN_ID"
+            # Drafts left by a failed attempt or a cancelled run were never
+            # published: drop them so every attempt starts clean.
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.draft and (.tag_name | startswith("rolling"))) | .id' |
+              while read -r id; do
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+              done
             cat > /tmp/release-notes.md <<'NOTES'
             Latest automated build from main.
 
@@ -324,10 +332,10 @@ jobs:
             | GUI | [dirsync](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync) | [dirsync.exe](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync.exe) |
             | CLI | [dirsync-cli](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync-cli) | [dirsync-cli.exe](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync-cli.exe) |
             NOTES
-            gh release create rolling \
+            gh release create "$draft" \
+              --draft \
               --target "$GITHUB_SHA" \
               --title "Rolling" \
-              --latest \
               --notes-file /tmp/release-notes.md \
               artifacts/dirsync.exe \
               artifacts/dirsync \
@@ -338,5 +346,22 @@ jobs:
               artifacts/sbom-x86_64-unknown-linux-musl.json \
               artifacts/sbom-cli-x86_64-unknown-linux-musl.json \
               artifacts/sbom-frontend.json
+            # The swap. The tag is created through the API (--cleanup-tag on
+            # delete, publishing the draft), never by `git push`: GITHUB_TOKEN
+            # belongs to a GitHub App, and pushing a ref whose tree carries
+            # .github/workflows/ is rejected without a `workflows` scope that
+            # the token cannot be granted. The old tag has to go first: an
+            # existing tag would pin the new release to the old commit.
+            if gh release view rolling > /dev/null 2>&1; then
+              gh release delete rolling --yes --cleanup-tag
+            fi
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/rolling" > /dev/null 2>&1; then
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/rolling"
+            fi
+            gh release edit "$draft" \
+              --tag rolling \
+              --target "$GITHUB_SHA" \
+              --draft=false \
+              --latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
