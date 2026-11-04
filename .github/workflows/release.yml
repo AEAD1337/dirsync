@@ -346,6 +346,7 @@ jobs:
               artifacts/sbom-x86_64-unknown-linux-musl.json \
               artifacts/sbom-cli-x86_64-unknown-linux-musl.json \
               artifacts/sbom-frontend.json
+            release="repos/$GITHUB_REPOSITORY/releases/$(gh release view "$draft" --json databaseId --jq .databaseId)"
             # The swap. The tag is created through the API (--cleanup-tag on
             # delete, publishing the draft), never by `git push`: GITHUB_TOKEN
             # belongs to a GitHub App, and pushing a ref whose tree carries
@@ -363,5 +364,22 @@ jobs:
               --target "$GITHUB_SHA" \
               --draft=false \
               --latest
+            # Deleting a tag turns a release carrying that tag name back into
+            # a draft, and GitHub does it asynchronously: it can land after
+            # the publish above and unpublish the new release. Keep checking,
+            # and publish again, until it has stayed up for 20 s. The tag now
+            # exists at the right commit, so republishing keeps it.
+            stable=0
+            for _ in $(seq 24); do
+              sleep 5
+              if [ "$(gh api "$release" --jq .draft)" = "true" ]; then
+                echo "Release fell back to a draft; publishing it again."
+                gh api -X PATCH "$release" -F draft=false -f make_latest=true > /dev/null
+                stable=0
+              elif [ $((++stable)) -ge 4 ]; then
+                break
+              fi
+            done
+            [ "$stable" -ge 4 ]
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
