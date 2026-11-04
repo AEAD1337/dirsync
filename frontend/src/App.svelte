@@ -803,6 +803,10 @@
     --border-subtle: #efefef;
     --text: #111;
     --text-muted: #666;
+    /* Status bar: 11px text needs more contrast than --text-muted gives.
+       Values sit at about 9.3:1 on --bar-bg-panel in both themes. */
+    --status-label: #000;
+    --status-value: #444;
     --hover: #f0f0f0;
     --input-bg: #fff;
     --btn-bg: #f3f4f6;
@@ -830,6 +834,8 @@
     --border-subtle: #2c2c2c;
     --text: #e8e8e8;
     --text-muted: #999;
+    --status-label: #fff;
+    --status-value: #c1c1c1;
     --hover: #2e2e2e;
     --input-bg: #1a1a1a;
     --btn-bg: #333;

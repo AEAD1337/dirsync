@@ -108,14 +108,14 @@
     display: flex;
     gap: 20px;
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--status-value);
     flex-wrap: wrap;
     /* Same advance width for every digit: without it 1 is narrower than 0,
        so even a same-length reading nudges its neighbours. */
     font-variant-numeric: tabular-nums;
   }
   .ind { display: flex; gap: 4px; align-items: baseline; }
-  .ind-label { font-weight: 600; color: var(--text); }
+  .ind-label { font-weight: 600; color: var(--status-label); }
   /* Widths cover the realistic worst case for each reading, so the row stays
      still as values grow and shrink. A value longer than its slot (a job of
      millions of ops, days of runtime) still grows rather than being clipped:
