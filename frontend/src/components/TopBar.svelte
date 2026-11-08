@@ -35,6 +35,12 @@
   } = $props();
 
   let menuOpen = $state(false);
+  // Close shuts the server down and cancels whatever is running. While a plan
+  // is live the first click only arms it, so a stray click cannot throw away
+  // a run; an idle app closes at once.
+  let closeArmed = $state(false);
+  let closeArmTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(closeArmTimer));
   // A pause was requested and the executor has not reached its next
   // checkpoint yet. POST /pause toggles, so a second click in that window
   // would silently resume: the button stays disabled until the state settles.
@@ -293,7 +299,6 @@
     isDark.set(newDark);
     const theme: Theme = newDark ? 'dark' : 'light';
     config.update(c => ({ ...c, theme }));
-    menuOpen = false;
     // Persist just the theme: the server merges it and owns the rest (the
     // last-used paths in particular, which a whole-config PUT used to reset).
     try {
@@ -304,10 +309,27 @@
   }
 
   function closeMenu() { menuOpen = false; }
+
+  async function requestClose() {
+    clearTimeout(closeArmTimer);
+    if (pathsLocked && !closeArmed) {
+      closeArmed = true;
+      closeArmTimer = setTimeout(() => { closeArmed = false; }, 3000);
+      return;
+    }
+    closeArmed = false;
+    await api.shutdown().catch(() => {});
+  }
+
+  const driveTitle: Record<'auto' | 'ssd' | 'hdd', string> = {
+    auto: 'Drive type is detected when a preview or run starts',
+    ssd: 'Solid-state drives: parallel I/O',
+    hdd: 'Spinning drive involved: serial I/O',
+  };
 </script>
 
 <div class="topbar">
-  <!-- Line 1: title + menu -->
+  <!-- Line 1: title + toolbar -->
   <div class="row row-1">
     <span class="app-title">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="22" height="22" style="vertical-align:middle;border-radius:5px;margin-right:6px;">
@@ -315,19 +337,68 @@
         <path d="M8 24 L60 24 L60 16 L88 31 L60 46 L60 38 L8 38 Z" fill="white"/>
         <path d="M8 62 L60 62 L60 54 L88 69 L60 84 L60 76 L8 76 Z" fill="white"/>
       </svg>dirsync</span>
-    <span class="drive-badge drive-badge-{driveMode}">{driveMode.toUpperCase()}</span>
-    <div class="menu-wrap">
-      <button type="button"class="menu-btn" onclick={() => menuOpen = !menuOpen} title="Menu">···</button>
-      {#if menuOpen}
-        <div class="backdrop" role="presentation" onclick={closeMenu}></div>
-        <div class="dropdown">
-          <button type="button" onclick={async () => { menuOpen = false; await api.shutdown().catch(() => {}); }}>Close</button>
-          <button type="button"onclick={toggleDark}>{$isDark ? '☀ Light mode' : '☾ Dark mode'}</button>
-          <button type="button" onclick={() => { menuOpen = false; onshowLog(); }}>Log</button>
-          <button type="button"onclick={() => { menuOpen = false; onshowLicenses(); }}>Licenses</button>
-          <button type="button"onclick={() => { menuOpen = false; onshowAbout(); }}>About</button>
-        </div>
-      {/if}
+    <div class="tools">
+      <button type="button" class="icon-btn" title="Log" aria-label="Log" onclick={onshowLog}>
+        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M4 1.5h5.5l3 3v10H4z M9.5 1.5v3h3 M6.5 8h4 M6.5 10.5h4 M6.5 13h2.5" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="icon-btn"
+        title={$isDark ? 'Light mode' : 'Dark mode'}
+        aria-label={$isDark ? 'Light mode' : 'Dark mode'}
+        onclick={toggleDark}
+      >
+        <!-- Shows the mode a click switches to. -->
+        {#if $isDark}
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="8" cy="8" r="3" />
+            <path d="M8 1.5V3 M8 13v1.5 M1.5 8H3 M13 8h1.5 M3.4 3.4l1.06 1.06 M11.54 11.54l1.06 1.06 M3.4 12.6l1.06-1.06 M11.54 4.46l1.06-1.06" />
+          </svg>
+        {:else}
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M13 9.5A5.5 5.5 0 1 1 6.5 3a5 5 0 0 0 6.5 6.5z" />
+          </svg>
+        {/if}
+      </button>
+      <button
+        type="button"
+        class="icon-btn close"
+        class:armed={closeArmed}
+        title={closeArmed ? 'Click again to close' : 'Close dirsync'}
+        aria-label={closeArmed ? 'Click again to close' : 'Close dirsync'}
+        onclick={requestClose}
+      >
+        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M8 1.5v6 M4.5 3.8a5.5 5.5 0 1 0 7 0" />
+        </svg>
+        {#if closeArmed}<span class="armed-label">Click again to close</span>{/if}
+      </button>
+      <div class="menu-wrap">
+        <button
+          type="button"
+          class="icon-btn"
+          title="More"
+          aria-label="More"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onclick={() => menuOpen = !menuOpen}
+        >
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <circle class="dot" cx="4" cy="8" r="1.25" />
+            <circle class="dot" cx="8" cy="8" r="1.25" />
+            <circle class="dot" cx="12" cy="8" r="1.25" />
+          </svg>
+        </button>
+        {#if menuOpen}
+          <div class="backdrop" role="presentation" onclick={closeMenu}></div>
+          <div class="dropdown">
+            <button type="button" onclick={() => { menuOpen = false; onshowLicenses(); }}>Licenses</button>
+            <button type="button" onclick={() => { menuOpen = false; onshowAbout(); }}>About</button>
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -417,6 +488,10 @@
       {const displayStatus = (status === 'idle' && previewing) ? 'previewing' : (status === 'idle' && running) ? 'running' : status}
       <span class="status-badge status-{displayStatus}">{displayStatus}</span>
     {/if}
+    <span class="drive" title={driveTitle[driveMode]}>
+      <span class="drive-label">Drive</span>
+      <span class="drive-badge drive-badge-{driveMode}">{driveMode.toUpperCase()}</span>
+    </span>
   </div>
 </div>
 
@@ -495,6 +570,58 @@
     flex: 1;
     letter-spacing: -0.3px;
   }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 28px;
+    height: 26px;
+    padding: 0 5px;
+    box-sizing: border-box;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .icon-btn:hover { background: var(--hover); }
+  .icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .icon .dot { fill: currentColor; stroke: none; }
+  .icon-btn.close:hover { color: var(--accent-red); border-color: var(--accent-red); }
+  .icon-btn.close.armed,
+  .icon-btn.close.armed:hover {
+    background: var(--accent-red);
+    border-color: var(--accent-red);
+    color: #fff;
+  }
+  .armed-label { font-size: 12px; font-weight: 500; white-space: nowrap; }
+
+  /* Row 3: drive mode, pushed to the right edge */
+  .drive {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .drive-label {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
   .drive-badge {
     font-size: 10px;
     font-weight: 700;
@@ -507,17 +634,6 @@
   .drive-badge-hdd  { background: #fef9c3; color: #854d0e; border: 1px solid #fde68a; }
 
   .menu-wrap { position: relative; }
-  .menu-btn {
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 3px 10px;
-    cursor: pointer;
-    font-size: 16px;
-    color: var(--text);
-    letter-spacing: 2px;
-  }
-  .menu-btn:hover { background: var(--hover); }
   .backdrop { position: fixed; inset: 0; z-index: 49; }
   .dropdown {
     position: absolute;
