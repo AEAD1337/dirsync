@@ -37,8 +37,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # SBOM generators are pinned so the output stays reproducible; bump deliberately.
-  CARGO_CYCLONEDX_VERSION: "0.5.9"
-  CYCLONEDX_NPM_VERSION: "6.0.1"
+  # The SHA-256 is that of the x86_64-unknown-linux-musl release tarball and
+  # changes with every version: take it from the release's .sha256 asset.
+  CARGO_CYCLONEDX_VERSION: "0.5.10"
+  CARGO_CYCLONEDX_SHA256: "528be9dd99ae522c3ee14fb881fd0cbf51767e8f12b74248f437e6a66b1a3c1b"
+  CYCLONEDX_NPM_VERSION: "7.0.0"
+  CYCLONEDX_SPEC_VERSION: "1.7"
 
 jobs:
   # Concurrency is set per job rather than for the whole workflow. Each build
@@ -69,7 +73,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "26"
       - name: Install frontend deps
         run: npm ci
         working-directory: frontend
@@ -115,7 +119,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "26"
       - name: Format check
         run: cargo fmt -- --check
       - name: Test
@@ -188,16 +192,19 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
-      # Third-party action pinned to a full commit SHA: a tag can be moved to
-      # point at different code, a commit SHA cannot. v2.88.0. It downloads
-      # the prebuilt release and checks it against the SHA-256 recorded in
-      # the action's manifest; `fallback: none` makes a missing manifest
-      # entry fail the job instead of silently installing an unverified build.
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32
-        with:
-          tool: cargo-cyclonedx@${{ env.CARGO_CYCLONEDX_VERSION }}
-          fallback: none
+          node-version: "26"
+      # The prebuilt release, checked against the SHA-256 pinned above before
+      # anything from it runs: a mismatch fails the job. (taiki-e/install-action
+      # does the same from its own manifest, but that lags new releases.)
+      - name: Install cargo-cyclonedx
+        run: |
+          name="cargo-cyclonedx-x86_64-unknown-linux-musl"
+          url="https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${CARGO_CYCLONEDX_VERSION}/${name}.tar.xz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$RUNNER_TEMP/${name}.tar.xz" "$url"
+          echo "${CARGO_CYCLONEDX_SHA256}  $RUNNER_TEMP/${name}.tar.xz" | sha256sum --check --strict
+          tar -xJf "$RUNNER_TEMP/${name}.tar.xz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/${name}/cargo-cyclonedx" "$HOME/.cargo/bin/cargo-cyclonedx"
+          cargo cyclonedx --version
       # Runtime dependency graphs for the shipped binaries. cargo-cyclonedx
       # resolves via `cargo metadata`, so dev-dependencies are excluded by
       # construction and `--no-build-deps` drops build-dependencies too.
@@ -205,7 +212,7 @@ jobs:
         run: >
           cargo cyclonedx
           --format json
-          --spec-version 1.5
+          --spec-version ${{ env.CYCLONEDX_SPEC_VERSION }}
           --features gui
           --target x86_64-pc-windows-msvc
           --no-build-deps
@@ -217,7 +224,7 @@ jobs:
         run: >
           cargo cyclonedx
           --format json
-          --spec-version 1.5
+          --spec-version ${{ env.CYCLONEDX_SPEC_VERSION }}
           --no-default-features
           --target x86_64-pc-windows-msvc
           --no-build-deps
@@ -226,7 +233,7 @@ jobs:
         run: >
           cargo cyclonedx
           --format json
-          --spec-version 1.5
+          --spec-version ${{ env.CYCLONEDX_SPEC_VERSION }}
           --features gui
           --target x86_64-unknown-linux-musl
           --no-build-deps
@@ -235,7 +242,7 @@ jobs:
         run: >
           cargo cyclonedx
           --format json
-          --spec-version 1.5
+          --spec-version ${{ env.CYCLONEDX_SPEC_VERSION }}
           --no-default-features
           --target x86_64-unknown-linux-musl
           --no-build-deps
@@ -249,12 +256,21 @@ jobs:
       # the Svelte runtime into the bundle that rust-embed ships inside the
       # binary: so these are recorded rather than omitted. npx pins the
       # generator's own version but resolves its dependencies at run time,
-      # which is why this runs here and not next to the binaries.
+      # which is why this runs here and not next to the binaries. Since 7.0
+      # the JSON schema validator is an optional peer the generator no longer
+      # pulls in itself: the ajv packages bring it back, and --validate makes
+      # a missing validator or an invalid BOM fail the step.
       - name: Generate frontend SBOM
         working-directory: frontend
         run: >
-          npx --yes @cyclonedx/cyclonedx-npm@${{ env.CYCLONEDX_NPM_VERSION }}
-          --spec-version 1.6
+          npx --yes
+          --package @cyclonedx/cyclonedx-npm@${{ env.CYCLONEDX_NPM_VERSION }}
+          --package ajv@8
+          --package ajv-formats@3
+          --package ajv-formats-draft2019@1
+          -- cyclonedx-npm
+          --spec-version ${{ env.CYCLONEDX_SPEC_VERSION }}
+          --validate
           --output-format JSON
           --output-reproducible
           --output-file ../sbom-frontend.json
