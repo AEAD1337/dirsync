@@ -33,7 +33,7 @@ indicatif = { version = "0.18", features = ["tokio"] }
 chrono = "0.4"
 
 # GUI (optional)
-axum = { version = "0.8", features = ["ws", "macros"], optional = true }
+axum = { version = "0.8", features = ["ws"], optional = true }
 rust-embed = { version = "8", optional = true, features = ["mime-guess"] }
 open = { version = "5", optional = true, features = ["shellexecute-on-windows"] }
 getrandom = { version = "0.3", optional = true }
