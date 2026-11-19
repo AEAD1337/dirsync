@@ -37,7 +37,7 @@ run_cargo_checks() {
 case "$ACTION" in
     update)
         run rustup update
-        run cargo update
+        run node scripts/cargo-cooldown.js
         run_frontend npm update --no-fund
         # npm outdated exits 1 when packages are behind: informational, not a failure.
         pushd frontend > /dev/null; npm outdated || true; popd > /dev/null
@@ -58,7 +58,7 @@ case "$ACTION" in
         run_frontend npm clean-install --no-fund
         run_frontend npm run check
         run rustup update
-        run cargo update
+        run node scripts/cargo-cooldown.js
         run_cargo_checks
         run cargo run --features gui -- --gui
         ;;
@@ -66,7 +66,7 @@ case "$ACTION" in
         run_frontend npm install --no-fund
         run_frontend npm run check
         run rustup update
-        run cargo update
+        run node scripts/cargo-cooldown.js
         run_cargo_checks "--release"
         ;;
     test)

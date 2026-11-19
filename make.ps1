@@ -101,7 +101,7 @@ Clear-Host
 switch ($Action) {
     "update" {
         Run-Command "rustup update"
-        Run-Command "cargo update"
+        Run-Command "node scripts/cargo-cooldown.js"
         # npm outdated exits 1 when packages are behind: that's informational,
         # not a failure, so run it outside Run-Command.
         Run-Frontend "npm update --no-fund"
@@ -128,7 +128,7 @@ switch ($Action) {
     "all" {
         Run-Frontend "npm clean-install --no-fund", "npm run check"
         Run-Command "rustup update"
-        Run-Command "cargo update"
+        Run-Command "node scripts/cargo-cooldown.js"
         Run-CargoChecks
         Run-Command "cargo run --features gui -- --gui"
     }
@@ -136,7 +136,7 @@ switch ($Action) {
     "release" {
         Run-Frontend "npm install --no-fund", "npm run check"
         Run-Command "rustup update"
-        Run-Command "cargo update"
+        Run-Command "node scripts/cargo-cooldown.js"
         Run-CargoChecks "--release"
     }
 
