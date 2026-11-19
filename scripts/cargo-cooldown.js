@@ -109,6 +109,11 @@ async function main() {
       return;
     }
     for (const c of young) {
+      // An earlier hold in this round can already have moved this crate:
+      // jiff pins jiff-static exactly, so holding jiff back takes jiff-static
+      // with it. `cargo update -p` would then name a version that is gone;
+      // the next round re-checks whatever the crate resolved to instead.
+      if (!readLock(fs.readFileSync(LOCK, 'utf8')).get(c.name)?.has(c.version)) continue;
       const published = ages.get(`${c.name}@${c.version}`);
       const eligible = new Date(published.getTime() + DAYS * 86400 * 1000).toISOString().slice(0, 10);
       // The newest version the lockfile had before that is older than this one.
