@@ -166,9 +166,9 @@ fn parse_from(mut parser: lexopt::Parser) -> Args {
             }
             Short('V') | Long("version") => {
                 let build_time_epoch: i64 = env!("BUILD_TIME").parse().unwrap_or(0);
-                let build_time = chrono::DateTime::from_timestamp(build_time_epoch, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
+                let build_time = jiff::Timestamp::from_second(build_time_epoch)
+                    .map(|ts| ts.strftime("%Y-%m-%d %H:%M UTC").to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
                 println!(
                     "dirsync {} ({} build, built {})\nLicense: {}",
                     env!("APP_VERSION"),

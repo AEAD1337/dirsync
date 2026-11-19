@@ -240,14 +240,13 @@ impl CliUi {
         let elapsed_str = format_duration(elapsed);
         let remaining_str = eta.map(format_duration).unwrap_or_else(|| "-".into());
         let eta_str = if let Some(secs) = eta {
-            use chrono::Local;
-            let arrival = Local::now() + chrono::Duration::seconds(secs as i64);
-            let now_date = Local::now().date_naive();
-            let arr_date = arrival.date_naive();
-            if arr_date == now_date {
-                format!("ETA {}", arrival.format("%H:%M"))
+            let now = jiff::Zoned::now();
+            let secs = i64::try_from(secs).unwrap_or(i64::MAX);
+            let arrival = now.saturating_add(jiff::SignedDuration::from_secs(secs));
+            if arrival.date() == now.date() {
+                format!("ETA {}", arrival.strftime("%H:%M"))
             } else {
-                format!("ETA {}", arrival.format("%a %H:%M"))
+                format!("ETA {}", arrival.strftime("%a %H:%M"))
             }
         } else {
             "ETA -".into()
