@@ -13,7 +13,7 @@ url: string;
 export const licenses: LicenseEntry[] = [
   { name: "@jridgewell/gen-mapping", version: "0.3.13", license: "MIT", copyright: "© 2024 Justin Ridgewell <justin@ridgewell.name>", url: "https://github.com/jridgewell/sourcemaps/tree/main/packages/gen-mapping" },
   { name: "@jridgewell/remapping", version: "2.3.5", license: "MIT", copyright: "© 2024 Justin Ridgewell <justin@ridgewell.name>", url: "https://github.com/jridgewell/sourcemaps/tree/main/packages/remapping" },
-  { name: "@jridgewell/resolve-uri", version: "3.1.2", license: "MIT", copyright: "© 2019 Justin Ridgewell <jridgewell@google.com>", url: "https://github.com/jridgewell/resolve-uri" },
+  { name: "@jridgewell/resolve-uri", version: "3.1.3", license: "MIT", copyright: "© 2019 Justin Ridgewell <jridgewell@google.com>", url: "https://github.com/jridgewell/resolve-uri" },
   { name: "@jridgewell/sourcemap-codec", version: "1.6.0", license: "MIT", copyright: "© 2024 Justin Ridgewell <justin@ridgewell.name>", url: "https://github.com/jridgewell/sourcemaps/tree/main/packages/sourcemap-codec" },
   { name: "@jridgewell/trace-mapping", version: "0.3.31", license: "MIT", copyright: "© 2024 Justin Ridgewell <justin@ridgewell.name>", url: "https://github.com/jridgewell/sourcemaps/tree/main/packages/trace-mapping" },
   { name: "@sveltejs/acorn-typescript", version: "1.0.13", license: "MIT", copyright: "© 2022 Tyreal Hu", url: "https://github.com/sveltejs/acorn-typescript#readme" },
@@ -86,7 +86,7 @@ export const licenses: LicenseEntry[] = [
   { name: "memchr", version: "2.8.3", license: "Unlicense OR MIT", copyright: "© 2015 Andrew Gallant", url: "https://github.com/BurntSushi/memchr" },
   { name: "mime", version: "0.3.18", license: "MIT OR Apache-2.0", copyright: "© 2014 Sean McArthur", url: "https://github.com/hyperium/mime" },
   { name: "mime_guess", version: "2.0.5", license: "MIT", copyright: "© 2015 Austin Bonander", url: "https://github.com/abonander/mime_guess" },
-  { name: "mio", version: "1.2.4", license: "MIT", copyright: "© 2014 Carl Lerche and other MIO contributors", url: "https://github.com/tokio-rs/mio" },
+  { name: "mio", version: "1.2.5", license: "MIT", copyright: "© 2014 Carl Lerche and other MIO contributors", url: "https://github.com/tokio-rs/mio" },
   { name: "once_cell", version: "1.21.4", license: "MIT OR Apache-2.0", copyright: "© Aleksey Kladov", url: "https://github.com/matklad/once_cell" },
   { name: "open", version: "5.4.5", license: "MIT", copyright: "© © `2015` `Sebastian Thiel`", url: "https://github.com/Byron/open-rs" },
   { name: "option-ext", version: "0.2.0", license: "MPL-2.0", copyright: "© Simon Ochsenreither", url: "https://github.com/soc/option-ext" },
