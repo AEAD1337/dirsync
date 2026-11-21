@@ -1784,3 +1784,31 @@ async fn a_directory_at_the_staging_path_fails_the_copy_and_survives() {
     assert!(!skip_log.is_empty(), "the copy should fail");
     assert_eq!(fs::read(staging.join("inner.txt")).unwrap(), b"inner");
 }
+
+/// A directory renamed in DST whose old name SRC now uses for a file: the
+/// dir move vacates the path in Phase 2, before copies run, so the copy must
+/// not be dropped as blocked. Used to fail the first run ("still holds
+/// content excluded from sync") and converge only on the second.
+#[tokio::test]
+async fn a_file_replacing_a_renamed_directory_lands_in_one_run() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    fs::write(src.path().join("a"), b"new file").unwrap();
+    fs::create_dir(src.path().join("b")).unwrap();
+    fs::write(src.path().join("b").join("x.txt"), b"same content").unwrap();
+    fs::create_dir(dst.path().join("a")).unwrap();
+    fs::write(dst.path().join("a").join("x.txt"), b"same content").unwrap();
+
+    let skip_log = mirror(src.path(), dst.path()).await;
+
+    assert!(
+        skip_log.is_empty(),
+        "{:?}",
+        skip_log.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert_eq!(fs::read(dst.path().join("a")).unwrap(), b"new file");
+    assert_eq!(
+        fs::read(dst.path().join("b").join("x.txt")).unwrap(),
+        b"same content"
+    );
+}

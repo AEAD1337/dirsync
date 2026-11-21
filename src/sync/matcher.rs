@@ -338,7 +338,7 @@ pub fn match_trees(
     let first_to_hash = to_hash_src.first().or(to_hash_dst.first()).cloned();
 
     // Emit the first file immediately so the CLI/GUI always shows something,
-    // then throttle to one event per 500 ms for the rest.
+    // then throttle to one event per 100 ms for the rest.
     let hash_start = Instant::now();
     let last_emit_ms = AtomicU64::new(0);
     let throttle_ms: u64 = 100;

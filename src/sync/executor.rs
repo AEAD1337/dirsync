@@ -35,8 +35,8 @@ fn tmp_path_for(dst: &Path) -> PathBuf {
 /// Real directories are *not* handled here: `remove_dir_all` would destroy
 /// excluded files that the plan deliberately left alone. Those are cleared by
 /// running their Delete/RmDir ops before the copy phase instead (see
-/// `blocking_copy_*` in `execute`), which preserves RmDir's refusal to remove a
-/// non-empty directory.
+/// `blocking_write_*` in `execute`), which preserves RmDir's refusal to remove
+/// a non-empty directory.
 fn clear_symlink_at(dst: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(dst) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -331,8 +331,8 @@ pub async fn execute(
     // Phase 1.5: clear DST directories that sit where a write op will land, by
     // running their own Delete/RmDir ops early (deepest-first order preserved
     // from the planner). A non-empty directory left by excluded content still
-    // survives RmDir, and the write then fails with a clear error rather than
-    // silently destroying data the user excluded.
+    // survives RmDir: the writes aimed at it are reported and dropped below
+    // rather than silently destroying data the user excluded.
     if !run_serial(
         blocking_write_deletes
             .into_iter()
@@ -347,11 +347,23 @@ pub async fn execute(
     // A directory that survived its RmDir still holds content the plan never
     // touches (excluded names): report what blocks it, and drop the writes
     // that would only fail against it with a bare "Access is denied".
+    //
+    // A directory that a dir move renames away is not blocking: Phase 2
+    // vacates its path before copies and symlinks run. That is the case of a
+    // DST folder renamed in SRC whose old name SRC now uses for a file.
+    let dir_move_sources: std::collections::HashSet<&Path> = dir_moves
+        .iter()
+        .filter_map(|op| match op {
+            SyncOp::Move { from, .. } => Some(from.as_path()),
+            _ => None,
+        })
+        .collect();
     let still_blocked: std::collections::HashSet<PathBuf> = if opts.dry_run {
         Default::default()
     } else {
         write_targets
             .iter()
+            .filter(|t| !dir_move_sources.contains(t.as_path()))
             .filter(|t| fs::symlink_metadata(t).is_ok_and(|m| m.is_dir()))
             .cloned()
             .collect()
@@ -1036,8 +1048,9 @@ async fn copy_with_progress(
             // Durable before the rename publishes it: after a power loss a
             // renamed-but-unflushed file can read back zero-filled while
             // already carrying the source's mtime, which the fast path would
-            // then call Identical forever. Small files skip this: one flush
-            // per file would dominate a run of thousands of them.
+            // then call Identical forever. The parallel small-file path
+            // skips this (one flush per file would dominate a run of thousands
+            // of them); in HDD mode small files come through here, flushed.
             dst_file.sync_all()?;
             Ok(())
         })
