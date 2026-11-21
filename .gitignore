@@ -13,3 +13,6 @@ Thumbs.db
 dirsync.code-workspace
 bundle.txt
 sbom*.json
+
+# Threat model (confidential, local only)
+docs/threat-model/

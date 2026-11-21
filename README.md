@@ -221,9 +221,9 @@ reads directly: no third-party coverage service and no upload token.
 
 ## Documentation
 
-- [Architecture](doc/architecture.md): module layout, data flow, and key design choices
-- [Design Decisions](doc/decisions.md): rationale behind non-obvious implementation choices
-- [GUI Protocol](doc/gui-protocol.md): WebSocket message format between the backend and Svelte frontend
+- [Architecture](docs/architecture.md): module layout, data flow, and key design choices
+- [Design Decisions](docs/decisions.md): rationale behind non-obvious implementation choices
+- [GUI Protocol](docs/gui-protocol.md): WebSocket message format between the backend and Svelte frontend
 
 ## License
 
