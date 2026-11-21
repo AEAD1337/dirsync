@@ -133,6 +133,97 @@ async fn static_assets_need_no_token() {
     assert_ne!(status(app(&dir), req).await, StatusCode::UNAUTHORIZED);
 }
 
+/// The Content-Security-Policy a response carries, if any.
+async fn csp(app: axum::Router, req: Request<Body>) -> Option<String> {
+    let resp = app.oneshot(req).await.unwrap();
+    resp.headers()
+        .get("content-security-policy")
+        .map(|v| v.to_str().unwrap().to_owned())
+}
+
+/// One directive of a policy, e.g. `script-src` -> `'self'`.
+fn directive<'a>(policy: &'a str, name: &str) -> Option<&'a str> {
+    policy
+        .split(';')
+        .map(str::trim)
+        .find_map(|d| d.strip_prefix(name)?.strip_prefix(' '))
+}
+
+#[tokio::test]
+async fn the_page_runs_only_its_own_scripts() {
+    let dir = TempDir::new().unwrap();
+    // Any script in the origin can read the session token: an injected one
+    // (a rendering flaw with a planted file name) must not run.
+    let req = get("/").body(Body::empty()).unwrap();
+    let policy = csp(app(&dir), req).await.expect("no CSP on the page");
+    assert_eq!(directive(&policy, "script-src"), Some("'self'"), "{policy}");
+    assert_eq!(
+        directive(&policy, "default-src"),
+        Some("'none'"),
+        "{policy}"
+    );
+    assert_eq!(directive(&policy, "object-src"), Some("'none'"), "{policy}");
+    assert_eq!(directive(&policy, "base-uri"), Some("'none'"), "{policy}");
+}
+
+#[tokio::test]
+async fn the_page_can_talk_only_to_its_own_server() {
+    let dir = TempDir::new().unwrap();
+    // A script that does run cannot send the token or a listing anywhere
+    // else: fetch and the WebSocket are limited to this instance.
+    let req = get("/").body(Body::empty()).unwrap();
+    let policy = csp(app(&dir), req).await.unwrap();
+    assert_eq!(
+        directive(&policy, "connect-src"),
+        Some(format!("'self' ws://127.0.0.1:{PORT} ws://localhost:{PORT}").as_str()),
+        "{policy}"
+    );
+    assert_eq!(
+        directive(&policy, "form-action"),
+        Some("'none'"),
+        "{policy}"
+    );
+}
+
+#[tokio::test]
+async fn the_page_cannot_be_framed() {
+    let dir = TempDir::new().unwrap();
+    let req = get("/").body(Body::empty()).unwrap();
+    let policy = csp(app(&dir), req).await.unwrap();
+    assert_eq!(
+        directive(&policy, "frame-ancestors"),
+        Some("'none'"),
+        "{policy}"
+    );
+}
+
+#[tokio::test]
+async fn the_spa_fallback_carries_the_policy_too() {
+    let dir = TempDir::new().unwrap();
+    // Unknown paths answer with index.html: the same page, the same policy.
+    let req = get("/some/client/route").body(Body::empty()).unwrap();
+    let policy = csp(app(&dir), req).await.expect("no CSP on the fallback");
+    assert_eq!(directive(&policy, "script-src"), Some("'self'"), "{policy}");
+}
+
+#[tokio::test]
+async fn every_response_forbids_mime_sniffing() {
+    let dir = TempDir::new().unwrap();
+    let app = app(&dir);
+    for uri in ["/", "/api/v1/config"] {
+        // The API answer is a 401 here (no token): rejections count too.
+        let req = get(uri).body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("x-content-type-options")
+                .map(|v| v.to_str().unwrap()),
+            Some("nosniff"),
+            "{uri}"
+        );
+    }
+}
+
 #[test]
 fn every_launch_gets_a_fresh_unguessable_token() {
     let a = dirsync::gui::server::new_token();

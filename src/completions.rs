@@ -161,12 +161,16 @@ Register-ArgumentCompleter -Native -CommandName dirsync -ScriptBlock {
         return
     }
 
-    # Paths go back as completion text, so one containing a space or another
-    # character PowerShell would split on must be quoted, or it becomes two
-    # arguments. Single quotes are literal; an embedded one is doubled.
+    # Paths go back as completion text, which PowerShell parses when the user
+    # accepts it: anything beyond plain name characters is single-quoted, or a
+    # space splits it into two arguments and a planted name runs code. That
+    # includes the typographic quotes U+2018 to U+201E, which PowerShell treats
+    # like ' and ", and the backtick escape. Inside the quotes every kind of
+    # single quote is doubled by PowerShell's own escaper.
     $quote = {
         param($path)
-        if ($path -match "[\s'`$&(){}@;,|<>]") { "'" + ($path -replace "'", "''") + "'" } else { $path }
+        if ($path -cmatch '^[\w.\\/:~+-]+$') { $path }
+        else { "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($path) + "'" }
     }
 
     # The argument after --config is a file, not a directory.

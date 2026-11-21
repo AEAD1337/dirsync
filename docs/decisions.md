@@ -332,3 +332,21 @@ All write calls are guarded with a content comparison and only write when the co
 **Who may talk to it:** only the tab opened with the per-launch session token. `Host` and `Origin` checks stop DNS rebinding and browser CSRF, but any local process can send correct headers, and loopback is shared by every user of the machine (all Linux users, every Windows RDP or fast-user-switching session). Without the token another user could point this server, which runs as you, at your files and mirror-delete them. The token travels in the URL fragment, which browsers never send in a request line or a Referer.
 
 **How it ends:** every shutdown trigger (last client gone, SIGINT/SIGTERM, Close) goes through `AppState::request_shutdown`, which sets the cancel flag before flipping the server's shutdown watch, and `server::start` awaits the executor task after `serve` returns. The in-flight chunked copy therefore stops at its next 256 KB chunk and the executor writes `Cancelled`, instead of the runtime drop waiting for the whole file and then discarding the rest of the plan with no final status.
+
+---
+
+## The GUI page runs only its own scripts
+
+**Decision:** Every response carries a Content-Security-Policy (`default-src 'none'`, `script-src 'self'`, `connect-src` limited to this instance's own HTTP and WebSocket origin, `frame-ancestors 'none'`, no `<base>`, no form targets) and `X-Content-Type-Options: nosniff`. Styles keep `'unsafe-inline'`.
+
+**Why:** the session token lives in the page (sessionStorage and a module variable), so any script that runs in the origin holds full control of a server that deletes files. File names from SRC and DST are rendered in that page; should a rendering flaw ever let one through as markup, the policy keeps it from running, and `connect-src` keeps a script that does run from sending the token or a listing elsewhere. The bundle has no inline script and no `eval`, so the policy costs nothing.
+
+**Why styles stay inline:** Svelte writes `style` attributes for layout (tree indentation, progress width, the logo's corner radius). A style cannot read the token.
+
+---
+
+## npm never runs package install scripts
+
+**Decision:** `frontend/.npmrc` sets `ignore-scripts=true`; `tests/npmrc.rs` fails if it goes missing.
+
+**Why:** `npm ci` runs inside the CI jobs that compile and upload the release binaries, and on the maintainer's machine. An install script of a compromised package would run there with access to both. The lockfile's only install script belongs to `fsevents` (optional, macOS-only), which ships a prebuilt binary. Explicit `npm run <script>` calls still run; only lifecycle scripts are skipped.

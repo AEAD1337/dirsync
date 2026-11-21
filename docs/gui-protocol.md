@@ -141,17 +141,17 @@ Lists directory contents for the path picker.
 
 Request:
 ```json
-{ "path": "/home/user/", "dir_only": true }
+{ "path": "/home/user/" }
 ```
 
-If `path` does not exist, the server walks up to the nearest readable ancestor. Returns up to 500 entries, sorted directories first then alphabetically. Hidden *files* (names starting with `.`) are skipped, but hidden directories are listed so they remain navigable. `dir_only: true` drops regular files entirely. Entries whose names are not valid Unicode are skipped: they cannot travel through JSON and back as a path the server could open again.
+If `path` does not exist, the server walks up to the nearest readable ancestor. Returns up to 500 entries, sorted alphabetically. Only directories are listed, hidden ones included so they remain navigable: SRC and DST are folders, and the listing must not double as a file index of the host. A `dir_only` field from older clients is ignored. Entries whose names are not valid Unicode are skipped: they cannot travel through JSON and back as a path the server could open again.
 
 ```json
 {
   "path": "/home/user",
   "entries": [
     { "name": "Documents", "path": "/home/user/Documents", "is_dir": true },
-    { "name": "notes.txt", "path": "/home/user/notes.txt", "is_dir": false }
+    { "name": "Music", "path": "/home/user/Music", "is_dir": true }
   ]
 }
 ```

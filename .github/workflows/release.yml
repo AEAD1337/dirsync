@@ -15,7 +15,7 @@ on:
     branches: ["main"]
     paths-ignore:
       - "**/*.md"
-      - "doc/**"
+      - "docs/**"
       - "reviews/**"
       - "LICENSE"
       - ".gitignore"
@@ -26,7 +26,7 @@ on:
     branches: ["main"]
     paths-ignore:
       - "**/*.md"
-      - "doc/**"
+      - "docs/**"
       - "reviews/**"
       - "LICENSE"
       - ".gitignore"
@@ -48,9 +48,9 @@ jobs:
   # Concurrency is set per job rather than for the whole workflow. Each build
   # job cancels the same job of an older run on the same ref, so an older
   # push stops spending minutes on binaries that would never be published.
-  # The release job has one group across all refs (workflow_dispatch can run
-  # from any branch), so only the newest run publishes `rolling`: a slower
-  # older run can no longer delete it and republish older binaries. Putting
+  # The release job has one group across all refs, so only the newest run
+  # publishes `rolling`: a slower older run can no longer delete it and
+  # republish older binaries. Putting
   # this at the workflow level instead would also cancel an older release
   # job halfway through swapping its draft in for the published release,
   # leaving no rolling release until the newer run's builds finished.
@@ -291,11 +291,17 @@ jobs:
     # build-windows and test-and-build-linux both run their compile checks
     # on pull requests too, so their success does not imply a push/dispatch
     # event: without this, a PR run would satisfy `needs` and this job would
-    # try to overwrite the rolling release before merge.
-    if: github.event_name != 'pull_request'
+    # try to overwrite the rolling release before merge. Only main publishes:
+    # a manual dispatch from another branch builds and tests that branch but
+    # never replaces `rolling` with code that is not on main.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Build provenance attestations: a short-lived OIDC token to sign them,
+      # and the right to store them with the repository.
+      id-token: write
+      attestations: write
     # One group for every ref: see the note at the top of `jobs`.
     concurrency:
       group: ${{ github.workflow }}-rolling-release
@@ -316,6 +322,21 @@ jobs:
         with:
           name: sbom
           path: artifacts/
+      # The binaries are not code-signed. Checksums let a download be compared
+      # with what this run published, and the attestation ties each binary to
+      # this repository, this workflow and this commit:
+      # `gh attestation verify <file> -R <owner>/<repo>`.
+      - name: Checksums
+        working-directory: artifacts
+        run: sha256sum dirsync dirsync.exe dirsync-cli dirsync-cli.exe sbom-*.json > SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            artifacts/dirsync
+            artifacts/dirsync.exe
+            artifacts/dirsync-cli
+            artifacts/dirsync-cli.exe
       - name: Publish rolling release
         # Third-party action pinned to a full commit SHA: a tag can be moved
         # to point at different code, a commit SHA cannot. v4.0.0.
@@ -347,6 +368,8 @@ jobs:
             | --- | --- | --- |
             | GUI | [dirsync](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync) | [dirsync.exe](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync.exe) |
             | CLI | [dirsync-cli](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync-cli) | [dirsync-cli.exe](https://github.com/AEAD1337/dirsync/releases/download/rolling/dirsync-cli.exe) |
+
+            Verify a download: `sha256sum -c SHA256SUMS --ignore-missing` compares it with this release's checksums, and `gh attestation verify <file> -R AEAD1337/dirsync` checks that this repository's release workflow built it.
             NOTES
             gh release create "$draft" \
               --draft \
@@ -361,7 +384,7 @@ jobs:
               artifacts/sbom-cli-x86_64-pc-windows-msvc.json \
               artifacts/sbom-x86_64-unknown-linux-musl.json \
               artifacts/sbom-cli-x86_64-unknown-linux-musl.json \
-              artifacts/sbom-frontend.json
+              artifacts/sbom-frontend.json               artifacts/SHA256SUMS
             release="repos/$GITHUB_REPOSITORY/releases/$(gh release view "$draft" --json databaseId --jq .databaseId)"
             # The swap. The tag is created through the API (--cleanup-tag on
             # delete, publishing the draft), never by `git push`: GITHUB_TOKEN

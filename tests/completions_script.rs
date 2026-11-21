@@ -142,3 +142,96 @@ fn zsh_and_fish_complete_files_after_config() {
             .contains("-l config -r -a '(__fish_complete_path)'")
     );
 }
+
+/// Runs the PowerShell script's `$quote` helper for real, where a PowerShell
+/// is available, and parses each completion text the way the shell would.
+/// Returns the paths whose text does not come back as exactly one argument
+/// with the path's own value, or `None` (and the caller skips) without one.
+fn powershell_misquoted(paths: &[&str]) -> Option<Vec<String>> {
+    let ps = script("powershell").unwrap();
+    let start = ps.find("    $quote = {").expect("no $quote helper");
+    let len = ps[start..].find("\n    }\n").expect("unterminated $quote") + "\n    }\n".len();
+    let helper = &ps[start..start + len];
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let json: Vec<String> = paths
+        .iter()
+        .map(|p| serde_json::to_string(p).unwrap())
+        .collect();
+    std::fs::write(
+        dir.path().join("paths.json"),
+        format!("[{}]", json.join(",")),
+    )
+    .unwrap();
+    // Parse `x <text>`: one command element after `x`, a constant whose
+    // value is the path, or the completion would run or split something.
+    let driver = format!(
+        "{helper}\n\
+         $paths = Get-Content -Raw -Encoding UTF8 paths.json | ConvertFrom-Json\n\
+         foreach ($p in $paths) {{\n\
+             $text = & $quote $p\n\
+             $tokens = $null; $errors = $null\n\
+             $ast = [System.Management.Automation.Language.Parser]::ParseInput(\"x $text\", [ref]$tokens, [ref]$errors)\n\
+             $els = @($ast.EndBlock.Statements[0].PipelineElements[0].CommandElements)\n\
+             $ok = $errors.Count -eq 0 -and $els.Count -eq 2 -and\n\
+                 $els[1] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and\n\
+                 $els[1].Value -ceq $p\n\
+             if (-not $ok) {{ [Console]::Out.WriteLine(\"BAD $p\") }}\n\
+         }}\n\
+         [Console]::Out.WriteLine('DONE')\n"
+    );
+    // UTF-8 with a BOM, so Windows PowerShell 5.1 reads the script as UTF-8.
+    std::fs::write(dir.path().join("driver.ps1"), format!("\u{feff}{driver}")).unwrap();
+    let out = ["pwsh", "powershell"].iter().find_map(|exe| {
+        std::process::Command::new(exe)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "driver.ps1",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .ok()
+    })?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stdout.contains("DONE"),
+        "driver failed: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(
+        stdout
+            .lines()
+            .filter_map(|l| l.strip_prefix("BAD ").map(str::to_owned))
+            .collect(),
+    )
+}
+
+#[test]
+fn powershell_completion_text_is_always_one_literal_argument() {
+    // PowerShell treats U+2018 to U+201B as single quotes and U+201C to
+    // U+201E as double quotes, and a backtick escapes the next character:
+    // a planted directory name must not close the quoting and run code
+    // when the user accepts the completion.
+    let paths = [
+        "plain",
+        "/home/user/My Files",
+        r"C:\Users\it's",
+        "C:\\x\u{2019}; Set-Variable pwned 1; \u{2019}",
+        "/tmp/a b\u{2018}$(Set-Variable pwned 1)\u{2018}",
+        "/tmp/it\u{2019}s",
+        "/tmp/q\u{201A}x\u{201B}y",
+        "/tmp/d\u{201C}x\u{201D}y\u{201E}",
+        "/tmp/back`tick",
+        "/tmp/dollar$HOME",
+        "/tmp/#hash",
+    ];
+    let Some(bad) = powershell_misquoted(&paths) else {
+        eprintln!("skipped: no PowerShell available");
+        return;
+    };
+    assert!(bad.is_empty(), "misquoted: {bad:?}");
+}

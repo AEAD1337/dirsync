@@ -502,6 +502,30 @@ async fn browse_skips_entries_whose_names_are_not_unicode() {
     serde_json::to_string(&resp).unwrap();
 }
 
+/// Only folders can be chosen as SRC or DST, so Browse lists nothing else,
+/// whatever the client asks for: a token holder gets no file listing of the
+/// host out of it.
+#[tokio::test]
+async fn browse_lists_directories_only_even_when_asked_for_files() {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join("folder")).unwrap();
+    std::fs::write(dir.path().join("secret.txt"), b"x").unwrap();
+    let state = state_with_config(&dir, AppConfig::default(), false);
+
+    let body: handlers::BrowseRequest = serde_json::from_value(serde_json::json!({
+        "path": dir.path(),
+        "dir_only": false,
+    }))
+    .unwrap();
+    let Json(resp) = handlers::post_browse(State(state), Json(body))
+        .await
+        .unwrap();
+
+    let names: Vec<String> = resp.entries.iter().map(|e| e.name.clone()).collect();
+    assert!(names.contains(&"folder".to_owned()), "{names:?}");
+    assert!(!names.contains(&"secret.txt".to_owned()), "{names:?}");
+}
+
 // --- Run and preview claims ---
 
 /// Fresh SRC and DST directories under `dir`.

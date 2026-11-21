@@ -9,7 +9,7 @@ on:
     branches: ["main"]
     paths-ignore:
       - "**/*.md"
-      - "doc/**"
+      - "docs/**"
       - "reviews/**"
       - "LICENSE"
       - ".gitignore"
@@ -20,7 +20,7 @@ on:
     branches: ["main"]
     paths-ignore:
       - "**/*.md"
-      - "doc/**"
+      - "docs/**"
       - "reviews/**"
       - "LICENSE"
       - ".gitignore"
@@ -85,14 +85,28 @@ jobs:
       # Needed to commit the badge payload back to main.
       contents: write
     steps:
+      # No credentials in the checkout: the token is handed to the pull and
+      # push at the end and to nothing else in this job.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Outside the work tree: an artifact unpacked into the checkout could
+      # carry files (a .git/config, a hook) that the git commands below would
+      # pick up.
       - uses: actions/download-artifact@v8
         with:
           name: coverage-summary
+          path: ${{ runner.temp }}/coverage
       - name: Publish badge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pct=$(jq -r '.data[0].totals.lines.percent | floor' coverage-summary.json)
-          rm coverage-summary.json
+          pct=$(jq -r '.data[0].totals.lines.percent | floor' "$RUNNER_TEMP/coverage/coverage-summary.json")
+          # Only a whole number from 0 to 100 reaches the badge and the commit.
+          case "$pct" in
+            ''|*[!0-9]*) echo "::error::unexpected coverage value"; exit 1 ;;
+          esac
+          if [ "$pct" -gt 100 ]; then echo "::error::unexpected coverage value"; exit 1; fi
           if   [ "$pct" -ge 80 ]; then color=brightgreen
           elif [ "$pct" -ge 70 ]; then color=green
           elif [ "$pct" -ge 50 ]; then color=yellow
@@ -112,6 +126,13 @@ jobs:
             exit 0
           fi
           git commit -m "coverage badge: $pct%"
+          # The token reaches git through the environment, as an HTTP header
+          # the way actions/checkout passes it: never in argv or .git/config.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
           # Another push can land while the tests run, which would reject a
           # plain push: rebase onto whatever main is now and try again.
           git pull --rebase origin main

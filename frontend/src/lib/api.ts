@@ -70,7 +70,7 @@ export const api = {
   getPlan: () => request<PlanSummary>('GET', '/plan'),
 
   browse: (path: string) =>
-    request<{ path: string; entries: BrowseEntry[] }>('POST', '/browse', { path, dir_only: true }),
+    request<{ path: string; entries: BrowseEntry[] }>('POST', '/browse', { path }),
 
   stat: (path: string) =>
     request<{ exists: boolean; is_dir: boolean }>('POST', '/stat', { path }),

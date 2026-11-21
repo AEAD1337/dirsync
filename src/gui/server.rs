@@ -3,7 +3,7 @@ use crate::progress::ProgressEvent;
 use axum::{
     Router,
     extract::Request,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -91,11 +91,40 @@ async fn require_session(
     }
 }
 
+/// The Content-Security-Policy of every response.
+///
+/// Any script running in the page's origin can read the session token, so
+/// only the bundle's own script files may run: no inline script, no eval,
+/// nothing from another origin. Should one run anyway, `connect-src` keeps
+/// it from sending the token or a directory listing anywhere but this
+/// instance. Styles allow `'unsafe-inline'`: Svelte writes `style`
+/// attributes for layout (tree indentation, progress width), and a style
+/// cannot read the token.
+fn content_security_policy(port: u16) -> String {
+    [
+        "default-src 'none'".to_owned(),
+        "script-src 'self'".to_owned(),
+        "style-src 'self' 'unsafe-inline'".to_owned(),
+        "img-src 'self'".to_owned(),
+        // 'self' covers fetch; the WebSocket's ws:// origin is named
+        // explicitly because older browsers do not count it as 'self'.
+        format!("connect-src 'self' ws://127.0.0.1:{port} ws://localhost:{port}"),
+        "object-src 'none'".to_owned(),
+        "base-uri 'none'".to_owned(),
+        "form-action 'none'".to_owned(),
+        "frame-ancestors 'none'".to_owned(),
+    ]
+    .join("; ")
+}
+
 /// The complete HTTP surface: API and WebSocket behind `require_session`,
 /// static assets without it (the page must load before it can read the
 /// token from its own URL; the assets contain no secrets and change nothing).
+/// Every response, rejections included, carries the security headers.
 pub fn router(state: Arc<AppState>, port: u16, token: String) -> Router {
     let token: Arc<str> = token.into();
+    let csp = HeaderValue::from_str(&content_security_policy(port))
+        .expect("the CSP is a valid header value");
     Router::new()
         .route(
             "/api/v1/config",
@@ -118,6 +147,19 @@ pub fn router(state: Arc<AppState>, port: u16, token: String) -> Router {
         }))
         .with_state(state)
         .fallback(static_handler)
+        // Added last so it wraps the fallback and the session gate as well.
+        .layer(middleware::map_response(move |mut response: Response| {
+            let csp = csp.clone();
+            async move {
+                let headers = response.headers_mut();
+                headers.insert(header::CONTENT_SECURITY_POLICY, csp);
+                headers.insert(
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                );
+                response
+            }
+        }))
 }
 
 /// Buffer a log entry for `GET /log` (the single server-side writer).

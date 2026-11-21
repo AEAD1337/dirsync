@@ -610,10 +610,10 @@ pub async fn post_shutdown(State(state): State<Arc<AppState>>) -> StatusCode {
 
 // ---------- Browse ----------
 
+/// Older clients also send `dir_only`; it is ignored (unknown fields are).
 #[derive(Deserialize)]
 pub struct BrowseRequest {
     pub path: PathBuf,
-    pub dir_only: bool,
 }
 
 #[derive(Serialize)]
@@ -680,7 +680,10 @@ fn browse_blocking(body: BrowseRequest) -> Result<BrowseResponse, (StatusCode, S
             Ok(m) => m,
             Err(_) => continue,
         };
-        if body.dir_only && !meta.is_dir() {
+        // Only folders can be chosen as SRC or DST, so nothing else is
+        // listed, whatever the client asks for: the listing must not double
+        // as a file index of the host for anyone holding the token.
+        if !meta.is_dir() {
             continue;
         }
         // A name that is not valid Unicode cannot travel through JSON and
@@ -691,9 +694,6 @@ fn browse_blocking(body: BrowseRequest) -> Result<BrowseResponse, (StatusCode, S
         let (Some(name), Some(path_str)) = (file_name.to_str(), path.to_str()) else {
             continue;
         };
-        if name.starts_with('.') && !meta.is_dir() {
-            continue; // skip hidden files but show hidden directories for navigation
-        }
         entries.push(BrowseEntry {
             name: name.to_owned(),
             path: path_str.to_owned(),

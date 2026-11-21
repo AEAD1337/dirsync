@@ -1704,3 +1704,83 @@ async fn small_copies_report_each_completion_while_the_phase_still_runs() {
         "completions arrived only after the phase"
     );
 }
+
+// --- Planted staging links ---
+
+/// Preview and run a mirror of `src` into `dst`, returning the skip log.
+async fn mirror(src: &Path, dst: &Path) -> dirsync::error::SkipLog {
+    let engine = SyncEngine::new(
+        src.to_path_buf(),
+        dst.to_path_buf(),
+        Arc::new(AppConfig::default()),
+    );
+    let plan = engine.preview(None, None).await.unwrap();
+    let (progress, _rx) = new_progress_channel();
+    let (_, pause_rx) = watch::channel(false);
+    let (_, cancel_rx) = watch::channel(false);
+    engine.run(plan, progress, false, pause_rx, cancel_rx).await
+}
+
+/// The staging name `<name>.__dirsync_tmp__` is predictable and the walker
+/// never shows it. A link planted there by anyone who can write into DST
+/// must not carry the copy to wherever it points: the victim file stays
+/// untouched and the copy still lands in DST.
+async fn planted_staging_link_is_not_followed(size: usize) {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+
+    let content = vec![b's'; size];
+    fs::write(src.path().join("f.bin"), &content).unwrap();
+    let victim = outside.path().join("victim.txt");
+    fs::write(&victim, b"keep me").unwrap();
+    let staging = dst.path().join("f.bin.__dirsync_tmp__");
+    if !common::symlink_file_or_unprivileged(&victim, &staging) {
+        return;
+    }
+
+    let skip_log = mirror(src.path(), dst.path()).await;
+
+    assert_eq!(
+        fs::read(&victim).unwrap(),
+        b"keep me",
+        "copy wrote through the link"
+    );
+    assert!(
+        skip_log.is_empty(),
+        "{:?}",
+        skip_log.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert_eq!(fs::read(dst.path().join("f.bin")).unwrap(), content);
+    assert!(
+        fs::symlink_metadata(&staging).is_err(),
+        "staging path left behind"
+    );
+}
+
+#[tokio::test]
+async fn a_planted_staging_link_is_not_followed_by_a_small_copy() {
+    planted_staging_link_is_not_followed(64).await;
+}
+
+#[tokio::test]
+async fn a_planted_staging_link_is_not_followed_by_a_large_copy() {
+    planted_staging_link_is_not_followed(2 * 1024 * 1024).await;
+}
+
+/// A directory at the staging path is never removed to make room: the op
+/// fails and the directory, with whatever it holds, stays.
+#[tokio::test]
+async fn a_directory_at_the_staging_path_fails_the_copy_and_survives() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    fs::write(src.path().join("f.bin"), b"new").unwrap();
+    let staging = dst.path().join("f.bin.__dirsync_tmp__");
+    fs::create_dir(&staging).unwrap();
+    fs::write(staging.join("inner.txt"), b"inner").unwrap();
+
+    let skip_log = mirror(src.path(), dst.path()).await;
+
+    assert!(!skip_log.is_empty(), "the copy should fail");
+    assert_eq!(fs::read(staging.join("inner.txt")).unwrap(), b"inner");
+}

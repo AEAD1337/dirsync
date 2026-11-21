@@ -46,6 +46,27 @@ fn clear_symlink_at(dst: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Remove whatever already sits at a staging path before it is written.
+///
+/// The staging name is predictable and the walker never shows it, so anyone
+/// who can write into DST can plant a symlink there: `fs::copy` and
+/// `File::create` would follow it and put SRC content wherever it points,
+/// outside DST. A leftover file of a killed run goes the same way. A real
+/// directory is never removed to make room: the copy fails instead, and
+/// whatever the directory holds stays.
+fn clear_staging(tmp: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(tmp) {
+        Ok(meta) if meta.is_dir() => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("a directory occupies the staging path {}", tmp.display()),
+        )),
+        // A file, or a link (a directory link on Windows needs remove_dir).
+        Ok(_) => fs::remove_file(tmp).or_else(|_| fs::remove_dir(tmp)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Clear the Windows readonly attribute on an existing regular file. A
 /// readonly DST file (mirrored from a readonly SRC file) otherwise fails
 /// every later rename onto it with "Access is denied". Unix readonly modes
@@ -91,6 +112,8 @@ fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
 ///   copy, whichever path wrote it (`fs::copy` mirrors attributes on its own,
 ///   the chunked loop does not).
 /// - A readonly DST file is replaced rather than failing forever.
+/// - Anything already at the staging path is removed first (see
+///   `clear_staging`), so `write` never writes through a planted link.
 /// - Any failure removes the staging file: left behind it litters DST.
 pub(crate) fn stage_and_commit(
     src: &Path,
@@ -99,6 +122,9 @@ pub(crate) fn stage_and_commit(
 ) -> Result<()> {
     let before = fs::metadata(src)?;
     let tmp = tmp_path_for(dst);
+    // Outside the closure: on failure the cleanup below would otherwise
+    // remove the very entry this refused to touch.
+    clear_staging(&tmp)?;
     let staged = (|| -> Result<()> {
         write(&tmp)?;
         let after = fs::metadata(src)?;
@@ -972,7 +998,12 @@ async fn copy_with_progress(
     tokio::task::spawn_blocking(move || -> Result<()> {
         stage_and_commit(&src, &dst, |tmp| {
             let mut src_file = fs::File::open(&src)?;
-            let mut dst_file = fs::File::create(tmp)?;
+            // create_new: never opens an entry that appeared after
+            // clear_staging, and never follows a link.
+            let mut dst_file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(tmp)?;
 
             let mut buf = vec![0u8; COPY_BUF];
             let mut written = 0u64;
