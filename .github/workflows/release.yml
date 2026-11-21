@@ -41,7 +41,7 @@ env:
   # changes with every version: take it from the release's .sha256 asset.
   CARGO_CYCLONEDX_VERSION: "0.5.10"
   CARGO_CYCLONEDX_SHA256: "528be9dd99ae522c3ee14fb881fd0cbf51767e8f12b74248f437e6a66b1a3c1b"
-  CYCLONEDX_NPM_VERSION: "7.0.0"
+  CYCLONEDX_NPM_VERSION: "7.0.1"
   CYCLONEDX_SPEC_VERSION: "1.7"
 
 jobs:
