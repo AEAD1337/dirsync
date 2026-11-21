@@ -4,15 +4,23 @@ The GUI is served by an embedded axum HTTP server, default port 7373, bound to `
 
 1. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`, else `403 Forbidden` (DNS rebinding).
 2. An `Origin` header, when present, must be `http://127.0.0.1:<port>` or `http://localhost:<port>`, else `403` (browser CSRF).
-3. The per-launch session token must match, else `401 Unauthorized`. The server generates 128 random bits at startup and opens the browser at `http://127.0.0.1:<port>/#t=<token>` (the URL is also printed to the console). The page moves the token from the fragment into `sessionStorage` and sends it as an `X-Dirsync-Token` header on every fetch, and as a `token` query parameter on the WebSocket (`/ws?token=<token>`), whose browser API cannot set headers. Headers are trivial to forge for any local process, and loopback is shared by every user of the machine: the token is what keeps another local user from driving this server, which runs as you.
+3. The per-launch session token must match, else `401 Unauthorized`. The server generates 128 random bits at startup and opens the browser at `http://127.0.0.1:<port>/#t=<token>` (the URL is also printed to the console). The page moves the token from the fragment into `sessionStorage` and sends it as an `X-Dirsync-Token` header on every fetch, and as a `token` query parameter on the WebSocket (`/ws?token=<token>`), whose browser API cannot set headers. The server accepts either form on every gated route; when the header is present, only the header is checked. Headers are trivial to forge for any local process, and loopback is shared by every user of the machine: the token is what keeps another local user from driving this server, which runs as you.
 
-Static assets (the page itself) need no token: the page has to load before it can read the token from its own URL, and the assets contain nothing secret.
+Static assets (the page itself) need no token: the page has to load before it can read the token from its own URL, and the assets contain nothing secret. Every path that matches no API route and is not `/ws` goes to the static handler without the three checks: an embedded file, `index.html` (the SPA fallback) for any other path, and a plain `404` for an unknown path under `/api/`.
+
+Every response carries `Content-Security-Policy` and `X-Content-Type-Options: nosniff`, the static assets, the SPA fallback and the `401`/`403`/`404` rejections included. The policy is:
+
+```
+default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self' ws://127.0.0.1:<port> ws://localhost:<port>; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+```
+
+A page served here can fetch only from its own origin and open only this instance's WebSocket. Scripts must be the bundle's own files (no inline script, no `eval`), images must come from the same origin (no `data:` URIs), inline styles are allowed, anything the policy does not name (fonts, media, workers) falls back to `'none'`, and no other page may frame it.
 
 ---
 
 ## HTTP API
 
-All routes are prefixed `/api/v1/`. Request and response bodies are JSON.
+All routes are prefixed `/api/v1/`. Request and response bodies are JSON; error bodies are plain text. A route that takes a body answers a request without `Content-Type: application/json` with `415`, malformed JSON with `400`, and a missing or wrongly typed field with `422`. Request fields are required unless the endpoint says otherwise.
 
 ### Config
 
@@ -32,7 +40,7 @@ Returns the current `AppConfig`.
 `theme` is one of `"light"` (the default), `"dark"`, `"system"` (follows the OS dark-mode setting live). `last_src` / `last_dst` are `null` when not yet set. Patterns given with `-e` on the command line appear in `exclude_patterns` for the session but are never written to the file.
 
 #### `PUT /api/v1/config`
-Partial update. Body: any subset of `port`, `exclude_patterns`, `theme`; absent fields keep their current value. `last_src` / `last_dst` are not accepted: the server records them on every preview, and a whole-config PUT built from a stale client snapshot used to overwrite them. Returns the full merged config, `400` for a port outside 1024-65535, or `500` if the file could not be written.
+Partial update. Body: any subset of `port`, `exclude_patterns`, `theme`; absent fields keep their current value. `last_src` / `last_dst` are not accepted: the server records them on every preview, and a whole-config PUT built from a stale client snapshot used to overwrite them. Returns the full merged config, `400` for a port below 1024 (one above 65535 is not a valid `u16` and gets `422`), or `500` if the file could not be written. After a `500` the in-memory config already holds the patch, so later requests and previews use it although the file does not.
 
 ---
 
@@ -50,12 +58,14 @@ Request:
 }
 ```
 
-Both paths must end with a directory separator. The server validates that both paths exist, are directories, are not system-critical (unless `--yolo`) and are not nested inside each other; a failure returns `400 Bad Request` with the reason as the body, synchronously, with no WebSocket event. `409 Conflict` means a run or another preview is in progress in this window. `423 Locked` means another running dirsync instance (another window, or a CLI run) uses an overlapping folder: this window's DST overlaps their SRC or DST, or this window's SRC overlaps their DST; the body names the folders. Unlike a 409 it is never retried silently. `last_src` / `last_dst` in the config are updated as a side effect.
+Both paths must end with a directory separator. The server validates that both paths exist, are directories, are not system-critical (unless `--yolo`) and are not nested inside each other; a failure returns `400 Bad Request` with the reason as the body, synchronously, with no WebSocket event. `409 Conflict` means a run or another preview is in progress in this window. `423 Locked` means another running dirsync instance (another window, or a CLI run) uses an overlapping folder: this window's DST overlaps their SRC or DST, or this window's SRC overlaps their DST; the body names the folders. The frontend ignores a `409` silently only for the auto-preview on load; a `423` it always reports. An accepted preview records `last_src` / `last_dst` in the config and saves it.
 
-On success the server emits `drive_mode` immediately after detecting drive types, then `scan_update` events during the walk, then `plan_ready` when done, and only then the `status_changed` to `idle` (the plan is stored before the status is released). A SRC or DST root that cannot be read fails the preview. A directory *below* the root that cannot be read is logged as a warning: nothing at or below its DST counterpart is deleted or used as a move source. On any other error the server emits `preview_failed` and resets status to `idle`.
+`excludes` is required (`[]` for none). Its patterns are added to the config's `exclude_patterns` for this preview only and are never saved.
+
+On success the events arrive in this order: `status_changed` `previewing`; a `log_entry` naming the detected drive types; `drive_mode`; `scan_progress` while each side is walked; `scan_update` for `src`, then `dst`, once both walks have finished; `scan_progress` for hashing, then planning; `plan_ready`; the plan summary `log_entry`; and only then `status_changed` `idle` (the plan is stored before the status is released). Warning `log_entry` events (unreadable paths, files that could not be hashed) can come in between. A SRC or DST root that cannot be read fails the preview: like any other error except a cancel, that emits `preview_failed` and then `status_changed` `idle`. A directory *below* the root that cannot be read is logged as a warning: nothing at or below its DST counterpart is deleted or used as a move source.
 
 #### `GET /api/v1/plan`
-Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no preview has been run yet.
+Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no preview has completed yet, and after any real run, finished or cancelled, since that drops the plan. A cancelled or failed preview leaves the previous plan in place.
 
 ```json
 {
@@ -92,25 +102,25 @@ Returns the most recently computed plan as a `PlanSummary`. Returns `404` if no 
 }
 ```
 
-`kind` values: `"copy"`, `"overwrite"`, `"move"`, `"dir-rename"`, `"case-rename"`, `"delete"`, `"symlink"`, `"touch"`. A `touch` (badge `~`, `size` 0) is a timestamp correction on an existing DST file; it gets a row because it writes to a user file. `MkDir` and `RmDir` ops are not included in the ops list (they are infrastructure; the GUI does not display them individually): but they **are** counted in `total_ops`, which is the whole plan's op count and therefore the same denominator the progress bar reports as `ops_total`. `total_ops` is consequently `>= ops.length`. `hash` is a hex-encoded SHA-256, present only when it was computed during matching. `from_path` is present only for `move`, `dir-rename`, and `case-rename`. `"case-rename"` is only emitted when the DST filesystem resolves names ignoring case (NTFS, APFS by default, exFAT, most SMB shares: probed at preview time, not assumed from the OS); `size` is always `0` for this kind.
+`kind` values: `"copy"`, `"overwrite"`, `"move"`, `"dir-rename"`, `"case-rename"`, `"delete"`, `"symlink"`, `"touch"`. A `touch` (badge `~`, `size` 0) is a timestamp correction on an existing DST file; it gets a row because it writes to a user file. `badge` is `+` for copy, U+21BB for overwrite, U+2192 for move, dir-rename and case-rename, U+2013 for delete, U+21E2 for symlink and `~` for touch. `move_count` counts `move`, `dir-rename` and `case-rename` alike. `MkDir` and `RmDir` ops are not included in the ops list (they are infrastructure; the GUI does not display them individually): but they **are** counted in `total_ops`, which is the whole plan's op count. `total_ops` is consequently `>= ops.length`. A run of the whole plan reports it as `ops_total`; a run's `ops_total` leaves out the ops `skip_prefixes` removed and adds one per extra rename the executor inserts to break a cycle of file moves (a swap). `hash` is present only on copy and overwrite rows whose SRC file was fingerprinted during matching: the hex-encoded SHA-256 of the file size plus its content, or of its first and last 512 KB for a file over 1 MB, so not a plain hash of the file. `from_path` is present only for `move`, `dir-rename`, and `case-rename`. `"case-rename"` is only emitted when the DST filesystem resolves names ignoring case (NTFS, APFS by default, exFAT, most SMB shares: probed at preview time, not assumed from the OS); `size` is always `0` for this kind.
 
-`total_bytes` is the progress-bar denominator: it is the sum of actual file bytes for copy/overwrite ops **plus** a 128 KB virtual token (`OP_TOKEN_BYTES`) per non-copy op (moves, deletes, mkdirs, rmdirs, symlinks, mtime touches). The token ensures all op types advance the progress bar, not just file copies.
+`total_bytes` is the progress-bar denominator: it is the sum of actual file bytes for copy/overwrite ops **plus** a 128 KB virtual token (`OP_TOKEN_BYTES`) per non-copy op (moves, deletes, mkdirs, rmdirs, symlinks, mtime touches). The token ensures all op types advance the progress bar, not just file copies. A run's `total_bytes` (in `progress_update`) shrinks by whatever `skip_prefixes` removed and grows by one token per cycle-breaking extra rename.
 
 ---
 
 ### Run
 
 #### `POST /api/v1/run`
-Starts executing the last computed plan. Returns `202 Accepted`; `409 Conflict` if a sync is already running, if a preview is in progress, or if `src`/`dst` differ from the stored plan's roots (the user edited the paths after previewing); `400 Bad Request` if no plan exists; `423 Locked` if another dirsync instance claimed an overlapping folder since the preview. A real run drops the plan server-side whether it finished or was cancelled: nothing records which ops already ran, so a replay would redo every completed move and delete and fail them against the correct files. Running again requires a new preview. A dry run changes nothing and keeps the plan.
+Starts executing the last computed plan. Returns `202 Accepted`; `409 Conflict` if a sync is already running, if a preview is in progress, or if `src`/`dst` differ from the stored plan's roots (the user edited the paths after previewing); `400 Bad Request` if no plan exists; `423 Locked` if another dirsync instance claimed an overlapping folder since the preview. A real run drops the plan server-side whether it finished or was cancelled: nothing records which ops already ran, so a replay would redo every completed move and delete and fail them against the correct files. Running again requires a new preview. A dry run changes nothing and keeps the plan. A request rejected with `400`, the src/dst `409` or `423` leaves the status `idle`, even after a finished run (see State machine).
 
 Request:
 ```json
 { "dry_run": false, "skip_prefixes": ["photos/2023"], "src": "/absolute/path/to/src/", "dst": "/absolute/path/to/dst/" }
 ```
 
-`src` and `dst` are required and must equal the paths of the preview that produced the plan.
+`dry_run`, `src` and `dst` are required; `src` and `dst` must equal the paths of the preview that produced the plan.
 
-`skip_prefixes` is optional (defaults to `[]`). Each entry is a forward-slash path relative to `dst_root`, as shown in the preview. Write ops at or below any prefix are dropped from the plan before execution and the plan's counts and `total_bytes` are recomputed; `delete` and `rmdir` ops are kept, because skipping a source directory suppresses writes into DST rather than cancelling cleanup of DST orphans. The stored plan is not modified: filtering applies to a clone, so running again without the prefixes needs no new preview.
+`skip_prefixes` is optional (defaults to `[]`). Each entry is a forward-slash path relative to `dst_root`, as shown in the preview. Write ops at or below any prefix are dropped from the plan before execution and the plan's counts and `total_bytes` are recomputed; `delete` and `rmdir` ops are kept, because skipping a source directory suppresses writes into DST rather than cancelling cleanup of DST orphans. The stored plan is not modified: filtering applies to a clone, so after a dry run the plan can run again with other prefixes, or none, without a new preview (a real run drops it either way). The run logs how many ops the prefixes removed, and its `ops_total` and `total_bytes` count only what is left.
 
 Progress is delivered over WebSocket. Run completion is signalled by a `status_changed` (and the next `progress_update`) with status `"done"` or `"cancelled"`. A cancel always ends in `"cancelled"`, including one that interrupts the last op, and is not reported as a file error.
 
@@ -144,11 +154,11 @@ Request:
 { "path": "/home/user/" }
 ```
 
-If `path` does not exist, the server walks up to the nearest readable ancestor. Returns up to 500 entries, sorted alphabetically. Only directories are listed, hidden ones included so they remain navigable: SRC and DST are folders, and the listing must not double as a file index of the host. A `dir_only` field from older clients is ignored. Entries whose names are not valid Unicode are skipped: they cannot travel through JSON and back as a path the server could open again.
+An empty `path` lists the home directory. If `path` cannot be listed (missing, not a directory, access denied), the server walks up to the nearest readable ancestor; when none is left it lists the home directory, and returns `500` only if that cannot be read either. Returns up to 500 entries, sorted by name in case-sensitive byte order (`Zeta` before `alpha`). Only directories are listed, hidden ones included so they remain navigable: SRC and DST are folders, and the listing must not double as a file index of the host. A `dir_only` field from older clients is ignored. Entries whose names are not valid Unicode are skipped: they cannot travel through JSON and back as a path the server could open again. The response `path` is the directory actually listed, forward-slashed, keeping a trailing separator the request had. Each entry's `path` is that directory joined with the name and is not slash-converted (backslashes on Windows).
 
 ```json
 {
-  "path": "/home/user",
+  "path": "/home/user/",
   "entries": [
     { "name": "Documents", "path": "/home/user/Documents", "is_dir": true },
     { "name": "Music", "path": "/home/user/Music", "is_dir": true }
@@ -162,7 +172,7 @@ Returns up to 12 directory path completions for the typed prefix. Used for the i
 Request: `{ "path": "/home/us" }`  
 Response: `{ "completions": ["/home/user", "/home/usr"] }`
 
-Only directories are completed, and unlike `/browse` this endpoint does skip dotted ones. Completions carry no trailing separator. Matching on the final component is case-insensitive. An empty `path` returns the filesystem roots: every existing drive root on Windows (not capped at 12), the entries of `/` elsewhere.
+Only directories are completed, and unlike `/browse` this endpoint does skip dotted ones. When `path` ends with a separator or names an existing absolute directory, the response lists that directory's children; otherwise the final component is matched case-insensitively against the names in its parent. Completions are sorted in byte order before the cap of 12 and carry no trailing separator, except Windows drive roots (`C:\`). Names that are not valid Unicode are converted lossily rather than skipped. An empty `path`, or a relative one without a parent component, returns the filesystem roots: every existing drive root on Windows (not capped at 12), the entries of `/` elsewhere.
 
 #### `POST /api/v1/stat`
 Lightweight existence check.
@@ -205,7 +215,7 @@ After a run with failures the per-file lines come first and the summary line las
 
 Connect to `ws://127.0.0.1:<port>/ws?token=<token>`. The server pushes JSON messages; each has a `"type"` discriminant field. Two delivery mechanisms are used:
 
-- **Polled (every 100 ms):** `progress_update`: always sent while the connection is open, regardless of activity.
+- **Polled (every 100 ms):** `progress_update`: always sent while the connection is open, regardless of activity. Right after it, `ops_completed` batches the ops finished since the previous tick, when there are any.
 - **Event-driven:** all other event types, sent as soon as the underlying condition occurs.
 
 ### State machine
@@ -215,19 +225,20 @@ idle / done / cancelled
  |- POST /preview -> previewing
  |    |- plan_ready, then status idle   (plan embedded in the event; awaiting POST /run)
  |    |- preview_failed -> idle
- |    '- POST /cancel -> idle           (no plan_ready, no preview_failed)
+ |    '- POST /cancel -> idle           (no plan_ready, no preview_failed; a cancel
+ |                                      that arrives while planning still ends in plan_ready)
  |
  |- POST /run -> running
  |    |- POST /pause -> paused -> POST /pause -> running
- |    |- POST /cancel -> cancelled      (plan dropped)
- |    '- all ops attempted -> done      (plan dropped)
+ |    |- POST /cancel -> cancelled      (real run: plan dropped)
+ |    '- all ops attempted -> done      (real run: plan dropped)
  |
  '- POST /shutdown -> (server exits)
 ```
 
-`done` and `cancelled` are terminal: the status stays there until the next preview, which moves through `previewing` back to `idle`.
+`done` and `cancelled` stay until the next preview, which moves through `previewing` back to `idle`, or the next run. A `POST /run` rejected with `400`, the src/dst `409` or `423` first claims `running` and then releases it to `idle`, so a rejected Run after a finished one turns `done` or `cancelled` into `idle`.
 
-Status transitions are reflected in the `status` field of every `progress_update` message, and additionally pushed as a dedicated `status_changed` event the moment they happen.
+Status transitions are reflected in the `status` field of every `progress_update` message. The ones the engine makes are also pushed as a dedicated `status_changed` event the moment they happen; an accepted preview or run is announced that way right after the handler's claim. The handlers' own writes are not: the rejected run's claim of `running` and its release to `idle`, and the `previewing` claim a `POST /preview` rolls back to the previous status on a `423`, only show up if a `progress_update` happens to sample them.
 
 ### Event reference
 
@@ -251,10 +262,10 @@ Sent every 100 ms while the WebSocket connection is open. Provides a complete sn
   "status": "running"
 }
 ```
-`current_file` is `null` when no large-file copy is in progress. `current_dir` is that file's directory relative to `dst_root`, forward-slashed, and is `null` whenever `current_file` is, plus for a file sitting directly in `dst_root` (which has no directory row to mark). The GUI marks that row as active for the whole copy: `ops_completed` implies where the parallel small copies are working, but says nothing during one long file. `eta_secs` is `null` when speed is too low to estimate, and once the run is done or cancelled. From that point `speed_mbps` and `elapsed_secs` hold their final values until the next run starts. `status` mirrors the state machine values: `"idle"`, `"previewing"`, `"running"`, `"paused"`, `"done"`, `"cancelled"`. `total_bytes` includes 128 KB virtual tokens for non-copy ops (see plan `total_bytes` note above); overall progress is always `done_bytes / total_bytes`.
+`current_file` is the name (not the path) of the file the chunked copy path is writing: every copy over 1 MB, and in HDD mode every copy, small ones included. It is `null` otherwise, including while the parallel small copies of SSD mode run. `current_file_size` and `current_file_done` belong to that file: they are 0 until the run's first chunked copy, so `current_file_pct` reads 100, and afterwards they keep the last file's values while `current_file` is `null`. `current_dir` is that file's directory relative to `dst_root`, forward-slashed, and is `null` whenever `current_file` is, plus for a file sitting directly in `dst_root` (which has no directory row to mark). The GUI marks that row as active for the whole copy: `ops_completed` implies where the parallel small copies are working, but says nothing during one long file. `eta_secs` is `null` when speed is too low to estimate, and once the run is done or cancelled. From that point `speed_mbps` and `elapsed_secs` hold their final values until the next run starts. `status` mirrors the state machine values: `"idle"`, `"previewing"`, `"running"`, `"paused"`, `"done"`, `"cancelled"`. `total_bytes` includes 128 KB virtual tokens for non-copy ops (see plan `total_bytes` note above); overall progress is always `done_bytes / total_bytes`.
 
 #### `status_changed`
-Pushed on every status transition, as it happens.
+Pushed on every status transition the engine makes, as it happens (see State machine for the handler writes it does not cover).
 ```json
 { "type": "status_changed", "status": "previewing" }
 ```
@@ -268,14 +279,14 @@ Emitted immediately after drive detection at the start of a preview, before the 
 `hdd` mirrors `DriveProfile::serial_copies()`. `hdd: true` means one or both endpoints resolved to HDD, so copies run one at a time; `hdd: false` means both resolved to SSD/unknown and copies run concurrently. It says nothing about the walk, which is always concurrent, nor about hashing, which is decided per endpoint rather than by this single flag. The GUI uses this to update the drive mode badge (`HDD` / `SSD`); the badge resets to `Auto` when a run completes or is cancelled.
 
 #### `scan_update`
-Emitted once per side after the directory walk completes during preview.
+Emitted once per side during preview, `src` then `dst`, after both walks have finished.
 ```json
 { "type": "scan_update", "side": "src", "file_count": 1842 }
 ```
-`side` is `"src"` or `"dst"`.
+`side` is `"src"` or `"dst"`. `file_count` counts non-directory entries, symlinks included; the DST count leaves out entries shielded by an unreadable SRC directory.
 
 #### `scan_progress`
-Emitted periodically during the preview phase to show what the engine is doing. `path` is the filename most recently processed (may be `null`).
+Emitted periodically during the preview phase to show what the engine is doing. While walking, `path` is the entry's path relative to that side's root, forward-slashed, at most one event per 500 ms per side, and each walk ends with the sentinel `"Done."` (a DST that does not exist yet is not walked). For hashing, the first event has `path` `null`; after it `path` is a file name without its directory, the first at once and then at most one per 100 ms. The planning event has `path` `null`.
 ```json
 { "type": "scan_progress", "phase": "hashing", "path": "video.mp4" }
 ```
@@ -303,7 +314,7 @@ Emitted when the preview plan is ready. Carries the full plan inline: no separat
 ```
 
 #### `error_occurred`
-Emitted when an individual file operation fails. The sync continues; errors accumulate in a skip log printed at the end. `path` is relative to `dst_root` with forward slashes, the same form as `rel_path` in the plan and `ops_completed`, so the client marks that row as failed (failed rows stay visible after the run).
+Emitted when an individual file operation fails. The sync continues; errors accumulate in a skip log printed at the end. `path` is relative to `dst_root` with forward slashes, the same form as `rel_path` in the plan and `ops_completed`, so the client marks that row as failed (failed rows stay visible after the run). When no plan is stored at the moment the server forwards the event, `path` is the absolute DST path unchanged.
 ```json
 { "type": "error_occurred", "path": "db/locked.db", "message": "Permission denied (os error 13)" }
 ```
@@ -311,11 +322,11 @@ Emitted when an individual file operation fails. The sync continues; errors accu
 #### `preview_failed`
 Emitted when a preview ends in an error other than a cancel (for example an unreadable SRC root).
 ```json
-{ "type": "preview_failed", "message": "cannot read /src: Permission denied (os error 13)" }
+{ "type": "preview_failed", "message": "cannot read /src/: IO error for operation on /src/: Permission denied (os error 13)" }
 ```
 
 #### `ops_completed`
-Flushed once per 100 ms tick (batched to avoid flooding the browser's JS event loop). Each entry is a destination path relative to `dst_root`, using forward slashes.
+Flushed once per 100 ms tick, right after that tick's `progress_update` and only when ops finished since the previous one (batched to avoid flooding the browser's JS event loop). Each entry is a destination path relative to `dst_root`, using forward slashes, with the same absolute fallback as `error_occurred`.
 ```json
 { "type": "ops_completed", "rel_paths": ["photos/2024/img001.jpg", "photos/2024/img002.jpg"] }
 ```

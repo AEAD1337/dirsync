@@ -20,7 +20,7 @@ Non-obvious choices and why they were made. Intended to answer "why is it done t
 
 **Why:** FAT32 stores mtime with 2-second granularity. When copying between NTFS (1-second or 100ns resolution) and FAT32, or across network shares with coarser timestamps, the same file can appear with a mtime difference of up to 2 seconds. The 3-second window covers FAT32 rounding plus a 1-second margin for other filesystem quirks. Without this tolerance, every file synced to a FAT32 volume would be re-hashed on every subsequent run.
 
-**Trade-off:** A genuine content change that also happens to shift the mtime by exactly 1 or 2 seconds would be missed by the fast path and caught only if the file size also changed, or if the mtime difference exceeds 3 seconds. This is acceptable because content changes almost always accompany a meaningful mtime update.
+**Trade-off:** A genuine content change that keeps the size and leaves the mtime within 3 seconds of the old one (the comparison is `<=`, so an unchanged mtime counts too) is missed by the fast path; it is caught only if the size also changed or the mtime moved by more than 3 seconds. This is acceptable because content changes almost always accompany a meaningful mtime update.
 
 ---
 
@@ -38,7 +38,7 @@ Non-obvious choices and why they were made. Intended to answer "why is it done t
 
 **Decision:** Files with `size == 0` are never considered as move candidates, even if a same-path DST file does not exist.
 
-**Why:** All empty files have the same SHA-256 (the hash of zero bytes). Without the exclusion, the first empty SRC file with no same-path DST counterpart would be matched against any empty DST file, potentially generating spurious `Move` ops and consuming a DST file that belongs to a different SRC path. There is no meaningful identity signal for empty files beyond their path.
+**Why:** All empty files have the same hash: `hash_file` feeds the size in before the content, so every one hashes to the SHA-256 of eight zero bytes (a length of 0). Without the exclusion, the first empty SRC file with no same-path DST counterpart would be matched against any empty DST file, potentially generating spurious `Move` ops and consuming a DST file that belongs to a different SRC path. There is no meaningful identity signal for empty files beyond their path.
 
 ---
 
@@ -61,7 +61,7 @@ Non-obvious choices and why they were made. Intended to answer "why is it done t
 **Decision:** the phases of `execute()`, in order:
 
 1. **MkDir** (except those inside a renamed subtree, see 5).
-2. **Hoisted cleanup** ("Phase 1.5"): the Delete/RmDir ops of any write target that DST currently holds as a *directory* (`dir_blocked_targets`, flagged by the planner from its walk).
+2. **Hoisted cleanup** ("Phase 1.5"): the Delete/RmDir ops of any write target that DST currently holds as a *directory* (`dir_blocked_targets`, flagged by the planner from its walk). A target still standing afterwards is reported and its writes are dropped, unless it is the source of a dir Move (see below).
 3. **Deletes of files occupying a dir-move target.**
 4. **File Moves** (topologically sorted), then **dir Moves**.
 5. **MkDirs inside renamed subtrees**, which target the post-rename path.
@@ -71,17 +71,19 @@ Non-obvious choices and why they were made. Intended to answer "why is it done t
 9. **TouchMtime**.
 10. **Deletes**, then **RmDir** (deepest first).
 
-Every phase honours pause and cancel between ops (`run_serial`).
+Every phase honours pause and cancel between ops: the serial phases through `run_serial`, the parallel small-copy phase in its own loop, which checks both before each spawn and drains the copies already in flight instead of aborting them. A large copy also polls cancel between chunks.
 
 **Why:**
 
 - MkDir before Copies: target directories must exist before files are written into them.
 - File Moves and dir Moves are independent: a detected dir rename requires an identical recursive file fingerprint, so no file move reads from or writes into a renamed subtree. File moves run first so a move can vacate a file that occupies a dir-move target (that file is a claimed move source, so it has no Delete op that step 3 could hoist).
 - MkDirs inside a renamed subtree wait for the dir move: created earlier, they would materialize the rename target and make the move fail.
-- Moves before Copies: a file Move's source might be at a path that a Copy would otherwise write to.
+- Moves before Copies and Symlinks: a dir Move can vacate a path a write lands on (DST's old dir `a` renamed to `b` while SRC's new file `a` is copied, see below), and writes inside a renamed subtree (Overwrites after a false pairing, Symlinks) are planned at the post-rename path, which exists only once the dir Move has run. File Moves are not the reason: a file Move never starts at a path a Copy writes (see the next section).
 - Copies before TouchMtime: mtime correction only makes sense once the file is in its final location. A moved file whose mtime diverged gets its TouchMtime in the same plan for the same reason.
-- Copies before Deletes: Deletes that would clobber a written path are suppressed by the planner (`occupied_dsts`, compared ignoring case on a case-insensitive DST).
-- **A write target that DST holds as a directory.** SRC and DST are independent trees, so DST can legally have a directory where SRC has a file. `fs::rename` cannot replace a directory, and that directory's own Delete/RmDir ops would otherwise not run until step 10: so the copy failed on every first run. Step 2 hoists exactly those cleanup ops in front of every write. RmDir still refuses to remove a non-empty directory, so excluded content is never destroyed: the executor then reports the directory as blocked, naming the entries that remain, and drops the writes aimed at it instead of letting them fail with a bare "Access is denied".
+- Deletes last (except the cleanup steps 2 and 3 hoist in front of the writes): orphan removal comes after everything is written, so a run cancelled during the copies has removed no orphan yet. Orphan Deletes and RmDirs inside a renamed subtree are also planned at the post-rename path, so they must follow the moves. Collisions with writes are not the reason: the planner already suppresses every Delete aimed at a written path (`occupied_dsts`, compared ignoring case on a case-insensitive DST).
+- **A write target that DST holds as a directory.** SRC and DST are independent trees, so DST can legally have a directory where SRC has a file. `fs::rename` cannot replace a directory, and that directory's own Delete/RmDir ops would otherwise not run until step 10: so the copy failed on every first run. Step 2 hoists exactly those cleanup ops in front of every write. A directory still standing after step 2 is one of two kinds:
+  - **The source of a dir Move.** It has no cleanup ops (the Move carries it), and step 4 renames it away before copies and symlinks run, so its writes stay in the plan. That is a DST folder renamed in SRC whose old name SRC now uses for a file: Move `a -> b` plus Copy `a`. Treated as blocked, the copy was dropped and the first run exited 1.
+  - **A directory holding content excluded from sync.** RmDir refuses to remove a non-empty directory, so that content is never destroyed: the executor reports the directory as blocked, naming the entries that remain, and drops the writes aimed at it instead of letting them fail with a bare "Access is denied".
 - **DST files that step 1 or 2 removes are never move sources.** One sitting where SRC has a directory is removed by that directory's MkDir; one below a path where SRC has a file is removed with its directory by step 2. The matcher keeps both out of move candidacy, so they become plain orphans and the SRC side becomes a Copy. Claimed as move sources, the first was deleted before its Move ran (which then renamed the new empty directory instead) and the second blocked its own target on every run.
 - Deletes before RmDir: directories must be empty before `remove_dir` is called.
 
@@ -107,7 +109,7 @@ Every phase honours pause and cancel between ops (`run_serial`).
 
 ## Small and large file copy paths are separate
 
-**Decision:** Files ≤ 1 MB use `std::fs::copy` (single syscall); files > 1 MB use a manual 256 KB chunk loop with progress events.
+**Decision:** Files <= 1 MB use `std::fs::copy` (single syscall) on up to 8 parallel workers; files > 1 MB use a manual 256 KB chunk loop with progress events. When either endpoint is spinning media, small files also run through the chunk loop, one at a time.
 
 **Why:** `std::fs::copy` on Linux resolves to `copy_file_range(2)` (kernel-space copy, zero user-space buffer) and on Windows to `CopyFileEx` (OS-optimised). For small files this is significantly faster than a user-space loop. Large files need the chunk loop so the progress bar can update during the copy: a single `fs::copy` call for a 10 GB file would block for tens of seconds with no feedback. The chunk size is 256 KB, chosen as a balance between syscall overhead and per-chunk progress granularity.
 
@@ -119,9 +121,9 @@ The 1 MB threshold matches the partial-hashing threshold, which is a coincidence
 
 **Decision:** The `needs_hash` classification loop (Phase 1) and the final matching loop (Phase 3) in `matcher.rs` run on one CPU core.
 
-**Why not parallelised yet:** Phase 1 can be replaced with `par_iter().flat_map().collect::<HashSet<_>>()` because `dst_by_path` and `dst_by_size` are immutable and `Sync`. Phase 3 is harder: the same-path classification arm can be parallelised with a parallel `map` followed by a sequential apply, but the move-detection arm must remain sequential because it mutates the shared `dst_matched` claim set. The benefit is meaningful only at very high file counts (1M+); for typical workloads the single-threaded O(N) loop is fast enough. Implement when profiling confirms this is the bottleneck.
+**Why not parallelised yet:** Phase 1 only reads immutable, `Sync` indexes (`dst_by_path`, `dst_by_path_lower`, `dst_by_size`), but its output is a `HashQueue` with separate `src` and `dst` sets, so that Phase 2 can hash each endpoint in its own stream at that drive's pace. A plain `par_iter().flat_map().collect::<HashSet<_>>()` would merge the two. Phase 3 is harder: the same-path classification arm can be parallelised with a parallel `map` followed by a sequential apply, but the move-detection arm must remain sequential because it mutates the shared `dst_matched` claim set. The benefit is meaningful only at very high file counts (1M+); for typical workloads the single-threaded O(N) loop is fast enough. Implement when profiling confirms this is the bottleneck.
 
-**How to tackle it:** Phase 1: `par_iter().flat_map(|src| { … }).collect()`. Phase 3: parallel `map` producing `(src, MatchResult)` pairs for same-path files, then a sequential pass to insert into `dst_matched` / `matched`; keep the move-detection arm sequential with its existing `dst_by_hash` O(1) lookup.
+**How to tackle it:** Phase 1: `par_iter().fold(HashQueue::default, ...)`, then a `reduce` that merges the `src` and `dst` sets pairwise, so the split survives. Phase 3: parallel `map` producing `(src, MatchResult)` pairs for same-path files, then a sequential pass to insert into `dst_matched` / `matched`; keep the move-detection arm sequential with its existing `dst_by_hash` O(1) lookup.
 
 ---
 
@@ -145,13 +147,13 @@ The 1 MB threshold matches the partial-hashing threshold, which is a coincidence
 
 **Decision:** Every non-Copy/Overwrite op (`Move`, `Delete`, `MkDir`, `RmDir`, `Symlink`, `TouchMtime`, `CaseRename`) contributes a fixed 128 KB virtual token (`OP_TOKEN_BYTES`) to `total_bytes` in the plan, and credits that same token to `done_bytes` when it completes. The overall progress percentage is always `done_bytes / total_bytes`.
 
-**Why:** Without weighting, `total_bytes` was zero for delete-only or move-only runs, making `overall_pct()` jump to 100 % immediately regardless of how many ops were still pending. Even in mixed runs, phases 1-4 (dirs, moves, symlinks, deletes, rmdirs) completed silently with no bar movement.
+**Why:** Without weighting, `total_bytes` was zero for delete-only or move-only runs, making `overall_pct()` jump to 100 % immediately regardless of how many ops were still pending. Even in mixed runs, every phase other than the copies (mkdirs, moves, case renames, symlinks, touches, deletes, rmdirs) completed silently with no bar movement.
 
 **Why a fixed token rather than actual file size for deletes:** Simplicity and predictability. Using the deleted file's real size would make a 10 GB delete dominate the bar over many small copies, which feels counterintuitive. A uniform token keeps progress movement proportional to op count, not file size, for the non-copy portion of the work.
 
 **Why 128 KB:** Small enough that a handful of renames/deletes don't materially distort the percentage when copying gigabytes; large enough that a delete-heavy or move-heavy phase visibly advances the bar next to real copies. It started at 8 KB, which was invisible against even a modest copy phase: a thousand deletes weighed the same as one 8 MB file.
 
-**Trade-off:** ETA and MB/s are still byte-based. For ops-only runs (no copies) these will show trivially small values (a few KB/s) rather than meaningful throughput, which is acceptable since such runs complete almost instantly.
+**Trade-off:** ETA and MB/s are computed from `done_bytes`, which the tokens feed too. For ops-only runs (no copies) the MB/s figure is the op rate times 128 KB (1,000 ops/s shows as about 125 MB/s) rather than any disk throughput; the ETA stays consistent, since the remaining work is measured in the same tokens. In mixed runs the tokens add a little to the displayed speed.
 
 ---
 
@@ -173,7 +175,7 @@ The 1 MB threshold matches the partial-hashing threshold, which is a coincidence
 
 **Platform-specific detection:**
 
-- **Windows**: uses `IOCTL_STORAGE_QUERY_PROPERTY` with `StorageDeviceTrimProperty` (`DeviceIoControl`). `TrimEnabled = true` → SSD; anything else (no TRIM support, failed query, UNC path without a drive letter) → HDD. This is more reliable than the seek-penalty IOCTL that sysinfo uses on Windows: USB flash drives and virtual/encrypted volumes incorrectly answer the seek-penalty query as "yes" (HDD) regardless of actual media type, whereas TRIM support is correctly reflected even through VeraCrypt (which passes TRIM through to the host device). Defaulting failures to HDD is the conservative choice: serial I/O on an SSD is safe, whereas parallel I/O on a real HDD degrades throughput.
+- **Windows**: uses `IOCTL_STORAGE_QUERY_PROPERTY` with `StorageDeviceTrimProperty` (`DeviceIoControl`). `TrimEnabled = true` -> SSD; anything else (no TRIM support, failed query, UNC path without a drive letter) -> HDD. This is more reliable than the seek-penalty IOCTL that sysinfo uses on Windows: USB flash drives and virtual/encrypted volumes incorrectly answer the seek-penalty query as "yes" (HDD) regardless of actual media type, whereas TRIM support is correctly reflected even through VeraCrypt (which passes TRIM through to the host device). Defaulting failures to HDD is the conservative choice: serial I/O on an SSD is safe, whereas parallel I/O on a real HDD degrades throughput.
 
 - **Linux / macOS**: uses sysinfo, which reads `/sys/block/*/queue/rotational` on Linux and IOKit on macOS. Both are accurate for physical drives without the USB/virtual-volume caveats that affect the Windows seek-penalty path.
 
@@ -197,15 +199,19 @@ The 1 MB threshold matches the partial-hashing threshold, which is a coincidence
 
 ## build.rs writes into the source tree
 
-**Decision:** `build.rs` writes back into the working tree. On every `cargo build`:
+**Decision:** `build.rs` writes back into the working tree whenever Cargo runs it. That is not every `cargo build`: Cargo re-runs it only when a declared input changes (`rerun-if-changed`: `build.rs`, `Cargo.lock`, which a version bump rewrites, the icon, `frontend/src`, `frontend/public`, `frontend/index.html` and the frontend's package and build config files; `rerun-if-env-changed`: `SKIP_FRONTEND_BUILD`). Each run writes:
 - `README.md`: shields.io version badge
 
 With the `gui` feature (the default) also:
 - `frontend/package.json`: `"version"` field (so `__APP_VERSION__` is current for Vite)
 - `frontend/package-lock.json`: top-level and `packages.""` version fields
-- `frontend/src/lib/licenses_generated.ts`: auto-generated license data for the About dialog
 
-All write calls are guarded with a content comparison and only write when the content has actually changed, so a re-build without a version bump leaves the working tree clean.
+And, only when `frontend/` exists and npm is on `PATH`:
+- `frontend/node_modules/`: `npm ci`, when it is missing
+- `frontend/src/lib/licenses_generated.ts`: auto-generated license data for the About dialog
+- `frontend/dist/`: the Vite build (`npm run build`), unless `SKIP_FRONTEND_BUILD` is set
+
+The four file writes are guarded with a content comparison and only write when the content has actually changed, so a re-build without a version bump leaves the tracked files clean.
 
 **License data is host-independent.** The file is committed, so every machine must generate the same bytes. The Rust half comes from `cargo metadata --filter-platform` for the release targets, with copyright lines read from each crate's own source; the npm half from `frontend/package-lock.json`, limited to what `frontend/src` imports (plus Vite's preload polyfill, which ships in the bundle) and skipping platform-specific packages (`os`/`cpu`). If either half cannot be collected, the existing file is kept unchanged with a warning instead of being overwritten with a partial list.
 
@@ -214,7 +220,7 @@ All write calls are guarded with a content comparison and only write when the co
 **Trade-offs acknowledged:**
 - Builds dirty the working tree on a version bump: mitigated by the content guard and the `git status` reminder in `CLAUDE.md`.
 - Two concurrent `cargo build` invocations can race on these files: acceptable for a single-developer tool.
-- Read-only or sandboxed source checkouts will fail at the write step: write errors are demoted to `cargo:warning` so the build does not abort (the binary is still usable; only the version badge and license list may be stale).
+- Read-only or sandboxed source checkouts: the four file writes demote their errors to `cargo:warning`, so they do not abort the build (only the version badge, the `package.json` / `package-lock.json` versions, the first of which feeds `__APP_VERSION__`, and the license list may be stale). The npm steps do abort it: `run_npm_with_env` panics when `npm ci` or `npm run build` fails, and both write under `frontend/`. Such a checkout needs `--no-default-features`, or `SKIP_FRONTEND_BUILD` with `node_modules` already installed (the variable skips only the Vite build, not `npm ci`).
 
 **Alternative (not taken):** A CI check that *asserts* version sync rather than *performing* it, combined with a manual `cargo build` requirement before committing. This would be cleaner but requires extra CI infrastructure and more developer discipline. The current approach keeps the version fields in sync automatically at zero extra cost for the common case.
 
@@ -226,13 +232,15 @@ All write calls are guarded with a content comparison and only write when the co
 
 **Why:** An atomic rename ensures the destination file is never observed in a partial state. If the process is killed mid-copy, the temp file is left behind but the destination is either the old complete version or the new complete version, never a corrupted intermediate. The temp name is chosen to be local to the same directory (so the rename is always same-filesystem and therefore atomic) and obviously synthetic.
 
+**The staging path is cleared first** (`clear_staging`). Its name is predictable and the walk never shows it, so whatever already sits there is removed before writing: a leftover file of a killed run, or a file or directory link planted by anyone who can write into DST, which `fs::copy` and `File::create` would follow and so put SRC content outside DST. A real directory there is never removed: the copy fails instead, and its contents stay. The chunked path also opens the staging file with `create_new`, which never opens an entry that appeared after the clear and never follows a link.
+
 **A source that changes during the copy is not committed.** Size and mtime are read before and after; if either moved (a database or VM image rewritten in place), the op fails with "source changed during copy" and the next run retries it. Committing it would leave a torn copy stamped with SRC's mtime, which the size+mtime fast path would call Identical forever. The copy is stamped with the mtime the source had *before* the copy.
 
 **Metadata policy:** both paths give the copy the source's mtime and permissions (`fs::copy` mirrors attributes on its own, the chunked loop did not, so behaviour used to depend on file size). A readonly DST file is replaced rather than failing: on Windows the readonly attribute is cleared before the rename, which it otherwise blocks with "Access is denied" on every run. Timestamps are written with `std::fs::set_times` (Rust 1.99), which asks only for the right to change attributes: unlike opening the file for writing, as the `filetime` crate does, that works on a readonly file without touching its attribute and on a file another program holds open with read-only sharing.
 
-**Crashes:** a killed process is covered by the rename; a power loss is only partly covered. Large files are flushed (`sync_all`) before the rename, because a renamed-but-unflushed file can read back zero-filled while already carrying SRC's mtime. Small files skip the flush: one per file would dominate a run of thousands of them, and a small file is also re-read in full whenever its size or mtime differs.
+**Crashes:** a killed process is covered by the rename; a power loss is only partly covered. Large files are flushed (`sync_all`) before the rename, because a renamed-but-unflushed file can read back zero-filled while already carrying SRC's mtime. Small files on the parallel path skip the flush: one per file would dominate a run of thousands of them, and a small file is also re-read in full whenever its size or mtime differs. When either endpoint is spinning media, small files go through the chunked path and are flushed like large ones.
 
-**Cleanup:** An ordinary I/O failure removes the staging file on the way out; only a hard kill can leave one behind. Any that do survive are excluded from the walk (`BUILTIN_EXCLUDES`), because otherwise they would be hashed and could be claimed as a move source in the next run: which made leftover litter load-bearing for correctness.
+**Cleanup:** An ordinary I/O failure removes the staging file on the way out (a directory found at the staging path is left alone); only a hard kill can leave one behind. Any that do survive are excluded from the walk (`BUILTIN_EXCLUDES`), because otherwise they would be hashed and could be claimed as a move source in the next run: which made leftover litter load-bearing for correctness. The next copy to the same target removes the leftover before it stages.
 
 ---
 
@@ -261,7 +269,7 @@ All write calls are guarded with a content comparison and only write when the co
 
 **Why deletes survive a skip:** skipping a *source* directory suppresses writes into DST; it does not mean "leave DST alone". Orphan cleanup under that path still runs, matching what the frontend's own display filter has always done (it keeps delete rows).
 
-**Why not mutate `last_plan`:** the stored plan stays the preview the user was shown. Filtering happens on a clone at run time, so re-running without the skips needs no re-preview.
+**Why not mutate `last_plan`:** the stored plan stays the preview the user was shown; filtering happens on a clone at run time. After a dry run, which keeps the plan, the user can run again with other skips or none without a new preview. A real run consumes the plan either way (see the next section), so the next Run needs a fresh preview.
 
 **"Add exclusion pattern" is different:** it changes what the *scan* sees, so it cannot be applied to an existing plan. The frontend marks the plan stale and Run needs a fresh preview, instead of silently executing the row the user just excluded.
 
@@ -305,7 +313,7 @@ All write calls are guarded with a content comparison and only write when the co
 
 ## A named config file must load
 
-**Decision:** `--config <file>` that is missing, unreadable, not UTF-8/UTF-16 text or not valid TOML is a usage error (exit 2). Only the default config location falls back to defaults, and it backs up an undecodable or unparseable file byte for byte (`config.toml.bad`) before anything can overwrite it. UTF-16 with a BOM (what Windows PowerShell 5.1's `>` writes) and UTF-8 with a BOM are decoded.
+**Decision:** `--config <file>` that is missing, unreadable, not UTF-8/UTF-16 text or not valid TOML is a usage error (exit 2). Every other load falls back to defaults: the default config location, and also a file named by `DIRSYNC_CONFIG`, which goes through the same fallback path rather than `--config`'s. There a missing file becomes defaults without a word, an unreadable one with a warning, and an undecodable or unparseable one with a warning after it is backed up byte for byte (`config.toml.bad` for the default file) before anything can overwrite it. UTF-16 with a BOM (what Windows PowerShell 5.1's `>` writes) and UTF-8 with a BOM are decoded.
 
 **Why:** defaults drop the job's excludes, and the DST content those excludes protect is then planned for deletion. A typo in a scheduled job's path must stop the job, not change what it deletes.
 
