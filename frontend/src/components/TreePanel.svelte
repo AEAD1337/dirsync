@@ -143,9 +143,8 @@
   function rowTooltip(row: DisplayRow, error: string | undefined): string {
     if (row.rowType !== 'op') return '';
     const op = row.op;
-    const sizePart = op.size > 0 ? `  -  ${formatBytes(op.size)}` : '';
-    const lines = [`${row.name}${sizePart}`];
-    if (op.hash) lines.push(op.hash.slice(0, 8));
+    const lines = [row.name];
+    if (op.size > 0) lines.push(formatBytes(op.size));
     lines.push(opDesc(op));
     if (error) lines.push(`Failed: ${error}`);
     return lines.join('\n');
