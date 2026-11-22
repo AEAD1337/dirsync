@@ -54,18 +54,18 @@ jobs:
   # this at the workflow level instead would also cancel an older release
   # job halfway through swapping its draft in for the published release,
   # leaving no rolling release until the newer run's builds finished.
-  build-windows:
-    # Test and the compile checks (Build, Build CLI-only) run on every PR so a
-    # Windows-only #[cfg(windows)] regression cannot hide behind a
-    # Linux-only PR pipeline. Staging and the artifact upload are release
-    # concerns and stay push/dispatch-only below.
-    runs-on: windows-latest
-    # Least privilege: these jobs only read the repository and upload
-    # artifacts. Only the release job below needs contents: write.
+  # The frontend is built here and nowhere else in this workflow: npm and the
+  # code of every npm package (Vite and its plugins, svelte-check) run in this
+  # job, which compiles no release binary and only uploads frontend/dist. The
+  # jobs that compile and upload the binaries download that bundle and set
+  # SKIP_FRONTEND_BUILD, so build.rs runs no npm there. Runs on pull requests
+  # too: their test jobs need the bundle as well.
+  frontend:
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     concurrency:
-      group: ${{ github.workflow }}-build-windows-${{ github.ref }}
+      group: ${{ github.workflow }}-frontend-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
@@ -74,9 +74,46 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "26"
-      - name: Install frontend deps
-        run: npm ci
+      # build.rs does the whole frontend build: npm ci (install scripts off
+      # through frontend/.npmrc), the license table from cargo metadata and
+      # the lockfile, then Vite. --release: the bundle reports the profile in
+      # its About dialog, and the binaries it ships in are release builds.
+      - name: Build frontend
+        run: cargo check --locked --release --features gui
+      - name: Type-check frontend
+        run: npm run check
         working-directory: frontend
+      - uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 1
+
+  build-windows:
+    # Test and the compile checks (Build, Build CLI-only) run on every PR so a
+    # Windows-only #[cfg(windows)] regression cannot hide behind a
+    # Linux-only PR pipeline. Staging and the artifact upload are release
+    # concerns and stay push/dispatch-only below.
+    needs: frontend
+    runs-on: windows-latest
+    # Least privilege: these jobs only read the repository and upload
+    # artifacts. Only the release job below needs contents: write.
+    permissions:
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}-build-windows-${{ github.ref }}
+      cancel-in-progress: true
+    # The bundle comes from the frontend job: build.rs runs no npm here.
+    env:
+      SKIP_FRONTEND_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend/dist/
       # The Windows-only code (case-only renames, drive detection,
       # normalize_path) is only exercised here: the Linux job cannot run it.
       # A debug build, not --release, so it does not rebuild with LTO; clippy
@@ -105,6 +142,7 @@ jobs:
           retention-days: 7
 
   test-and-build-linux:
+    needs: frontend
     runs-on: ubuntu-latest
     # Least privilege: these jobs only read the repository and upload
     # artifacts. Only the release job below needs contents: write.
@@ -113,33 +151,26 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-build-linux-${{ github.ref }}
       cancel-in-progress: true
+    # The bundle comes from the frontend job: build.rs runs no npm here.
+    env:
+      SKIP_FRONTEND_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/download-artifact@v8
         with:
-          node-version: "26"
+          name: frontend-dist
+          path: frontend/dist/
       - name: Format check
         run: cargo fmt -- --check
       - name: Test
         run: cargo test --locked --all-features --verbose
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      # build.rs already ran npm ci and the Vite build during Test/Clippy
-      # above (cargo invokes it whenever the gui feature is active, and
-      # --all-features enables it), so node_modules and the generated
-      # license file already exist here.
-      - name: Type-check frontend
-        run: npm run check
-        working-directory: frontend
       # Everything below is skipped for pull requests: a PR just needs the
       # checks above. A manual workflow_dispatch run does build and release,
       # which is the point of having the manual trigger at all.
-      - name: Install frontend deps
-        if: github.event_name != 'pull_request'
-        run: npm ci
-        working-directory: frontend
       - name: Install musl tools
         if: github.event_name != 'pull_request'
         run: sudo apt-get install -y musl-tools

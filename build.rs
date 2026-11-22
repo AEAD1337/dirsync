@@ -64,6 +64,17 @@ fn main() {
         return;
     }
 
+    // Built elsewhere (the release workflow's frontend job): run no npm at
+    // all, so no npm package code executes where the binaries are compiled.
+    if std::env::var_os("SKIP_FRONTEND_BUILD").is_some() {
+        // The bundle is this build's input now: re-check it when it changes.
+        println!("cargo:rerun-if-changed=frontend/dist/index.html");
+        if let Err(e) = prebuilt_frontend(&frontend) {
+            panic!("{e}");
+        }
+        return;
+    }
+
     // Check if npm is available
     let npm_cmd = if cfg!(target_os = "windows") {
         "npm.cmd"
@@ -87,11 +98,6 @@ fn main() {
     // Must happen before vite build so the import resolves.
     generate_licenses_ts(&root, &frontend);
 
-    // Skip vite build if env var set (e.g. CI matrix after building once)
-    if std::env::var("SKIP_FRONTEND_BUILD").is_ok() {
-        return;
-    }
-
     // Always invoke Vite: it has its own incremental build cache and is fast.
     // The old mtime-sentinel heuristic was incomplete: editing any file other
     // than App.svelte silently skipped the rebuild and shipped stale assets.
@@ -101,6 +107,22 @@ fn main() {
         &["run", "build"],
         &[("APP_PROFILE", &profile)],
     );
+}
+
+/// Check the bundle a `SKIP_FRONTEND_BUILD` build embeds as is. rust-embed
+/// would compile an empty or missing `frontend/dist` into a binary whose GUI
+/// serves nothing, so a missing bundle is an error, not a warning.
+pub fn prebuilt_frontend(frontend: &Path) -> Result<(), String> {
+    let index = frontend.join("dist").join("index.html");
+    if index.is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "SKIP_FRONTEND_BUILD is set but {} is missing: build the frontend first \
+             (npm ci and npm run build in frontend/), or unset SKIP_FRONTEND_BUILD",
+            index.display()
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
