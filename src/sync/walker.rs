@@ -172,6 +172,25 @@ pub fn walk(
             }
         };
 
+        // A named pipe, socket or device is not a file that can be mirrored,
+        // and opening a FIFO to hash or copy it blocks until a writer
+        // appears, which can be never, with no way to cancel. Report it like
+        // an unreadable path instead: in SRC that also shields its DST
+        // counterpart, in DST it is never hashed, overwritten or deleted.
+        if !metadata.is_dir() && !metadata.is_file() {
+            let message =
+                "not a regular file, directory or symlink (a pipe, socket or device): skipped";
+            warn(
+                &progress,
+                format!("Skipping {}: {message}", entry.path().display()),
+            );
+            walked.errors.push(WalkError {
+                rel_path,
+                message: message.to_owned(),
+            });
+            continue;
+        }
+
         let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let size = if metadata.is_dir() { 0 } else { metadata.len() };
 

@@ -78,6 +78,9 @@ pub struct PlanSummary {
     pub total_bytes: u64,
     pub total_ops: usize,
     pub ops: Vec<OpEntry>,
+    /// See `SyncPlan::src_empty`: the client asks for confirmation before
+    /// running such a plan.
+    pub src_empty: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -418,6 +421,7 @@ pub fn plan_to_summary(plan: &SyncPlan) -> PlanSummary {
         total_bytes: plan.total_bytes,
         total_ops,
         ops,
+        src_empty: plan.src_empty,
     }
 }
 
@@ -438,6 +442,10 @@ pub struct RunRequest {
     /// against a destination the UI no longer showed.
     pub src: String,
     pub dst: String,
+    /// The user confirmed running a plan whose SRC was empty while DST was
+    /// not (`SyncPlan::src_empty`): such a run deletes everything in DST.
+    #[serde(default)]
+    pub allow_empty_src: bool,
 }
 
 pub async fn post_run(
@@ -491,6 +499,19 @@ pub async fn post_run(
         return Err((
             StatusCode::CONFLICT,
             "SRC/DST changed since the last preview: run a new preview first".into(),
+        ));
+    }
+
+    // An empty SRC over a populated DST deletes all of DST, and is what an
+    // unmounted drive or share looks like: only with the user's explicit
+    // confirmation. The plan stays stored for the confirmed retry.
+    if plan.src_empty && !body.dry_run && !body.allow_empty_src {
+        release_claim();
+        return Err((
+            StatusCode::CONFLICT,
+            "SRC is empty but DST is not: this run would delete everything in DST. \
+             Confirm to run it anyway"
+                .into(),
         ));
     }
 
@@ -939,6 +960,7 @@ mod tests {
             hdd: false,
             dir_blocked_targets: vec![],
             walk_errors: vec![],
+            src_empty: false,
         }
     }
 

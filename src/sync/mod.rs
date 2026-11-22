@@ -208,6 +208,10 @@ impl SyncEngine {
         // still exist in SRC: leave it out of matching entirely, so it is
         // neither deleted as an orphan nor claimed as a move source.
         let dst_entries = shield_unreadable(dst_walk.entries, &src_walk.errors);
+        // Nothing to mirror from, everything to delete: an unmounted mount
+        // point looks exactly like this. Shielded DST entries are already
+        // gone from dst_entries, so only what the plan would delete counts.
+        let src_empty = src_entries.is_empty() && !dst_entries.is_empty();
         let walk_errors: Vec<crate::error::FileError> = src_walk
             .errors
             .iter()
@@ -295,6 +299,7 @@ impl SyncEngine {
             drives.serial_copies(),
         );
         plan.walk_errors = walk_errors;
+        plan.src_empty = src_empty;
 
         deliver(plan);
         release_previewing(&progress);

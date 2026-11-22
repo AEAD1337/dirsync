@@ -278,6 +278,8 @@
   // Ops the plan holds without a display row (MkDir/RmDir). A Skip may drop
   // some of them server-side, which the client cannot count exactly.
   let hiddenOps = 0;
+  // The current plan came from an empty SRC over a populated DST.
+  let srcEmpty = false;
 
   // Populate the ops tree and plan metadata from a plan summary: the WS
   // plan_ready event, or GET /plan when recovering state after a reload.
@@ -289,6 +291,7 @@
     completed = new Set();
     pendingCompleted = new Set();
     hiddenOps = Math.max(0, plan.total_ops - plan.ops.length);
+    srcEmpty = plan.src_empty;
     planMeta.set({ totalOps: plan.total_ops, totalBytes: plan.total_bytes });
   }
 
@@ -476,10 +479,16 @@
 
   async function handleRun() {
     if (running) return;
+    // An unmounted drive or share reads as an empty SRC: the plan then
+    // deletes all of DST. The server refuses it without this confirmation.
+    if (srcEmpty && !confirm(
+      'SRC is empty but DST is not: this run deletes everything in DST.\n\n' +
+      'If SRC is an unmounted drive or share, cancel and mount it first.\n\n' +
+      'Run anyway?')) return;
     running = true;
     clearErrors();
     try {
-      await api.run(false, skippedPrefixes, $src, $dst);
+      await api.run(false, skippedPrefixes, $src, $dst, srcEmpty);
     } catch (err) {
       running = false;
       if (err instanceof ApiError && err.status === 423) {

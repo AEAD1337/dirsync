@@ -34,6 +34,7 @@ fn plan_for(src_root: PathBuf, dst_root: PathBuf, ops: Vec<SyncOp>) -> SyncPlan 
         hdd: false,
         dir_blocked_targets: vec![],
         walk_errors: vec![],
+        src_empty: false,
     }
 }
 
@@ -77,6 +78,7 @@ async fn post_run_clears_the_plan_once_the_run_is_done() {
         skip_prefixes: vec![],
         src: src.to_string_lossy().into_owned(),
         dst: dst.to_string_lossy().into_owned(),
+        allow_empty_src: false,
     };
     let code = handlers::post_run(State(state.clone()), Json(body))
         .await
@@ -301,7 +303,52 @@ fn run_request(src: &std::path::Path, dst: &std::path::Path) -> RunRequest {
         skip_prefixes: vec![],
         src: src.to_string_lossy().into_owned(),
         dst: dst.to_string_lossy().into_owned(),
+        allow_empty_src: false,
     }
+}
+
+/// A plan from an empty SRC over a populated DST deletes all of DST: the
+/// server refuses to run it unless the client says the user confirmed, and
+/// the refusal leaves the plan in place for that confirmed retry.
+#[tokio::test]
+async fn an_empty_src_plan_runs_only_when_confirmed() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with_config(&dir, AppConfig::default(), false);
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    std::fs::write(dst.join("keep.txt"), b"x").unwrap();
+    let mut plan = plan_for(
+        src.clone(),
+        dst.clone(),
+        vec![SyncOp::Delete {
+            path: dst.join("keep.txt"),
+            size: 1,
+        }],
+    );
+    plan.src_empty = true;
+    *state.last_plan.write().unwrap() = Some(plan);
+
+    let (code, message) = handlers::post_run(State(state.clone()), Json(run_request(&src, &dst)))
+        .await
+        .expect_err("an unconfirmed empty-SRC run must be refused");
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert!(message.contains("empty"), "{message}");
+    assert!(dst.join("keep.txt").exists());
+    assert!(
+        state.last_plan.read().unwrap().is_some(),
+        "the plan stays for the retry"
+    );
+
+    let confirmed = RunRequest {
+        allow_empty_src: true,
+        ..run_request(&src, &dst)
+    };
+    let code = handlers::post_run(State(state.clone()), Json(confirmed))
+        .await
+        .expect("a confirmed run is accepted");
+    assert_eq!(code, StatusCode::ACCEPTED);
 }
 
 fn sent_json(out: WsOutput) -> serde_json::Value {

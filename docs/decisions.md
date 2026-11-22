@@ -206,10 +206,12 @@ With the `gui` feature (the default) also:
 - `frontend/package.json`: `"version"` field (so `__APP_VERSION__` is current for Vite)
 - `frontend/package-lock.json`: top-level and `packages.""` version fields
 
-And, only when `frontend/` exists and npm is on `PATH`:
+And, only when `frontend/` exists, npm is on `PATH` and `SKIP_FRONTEND_BUILD` is not set:
 - `frontend/node_modules/`: `npm ci`, when it is missing
 - `frontend/src/lib/licenses_generated.ts`: auto-generated license data for the About dialog
-- `frontend/dist/`: the Vite build (`npm run build`), unless `SKIP_FRONTEND_BUILD` is set
+- `frontend/dist/`: the Vite build (`npm run build`)
+
+With `SKIP_FRONTEND_BUILD` set, the frontend was built elsewhere: `build.rs` runs no npm at all and embeds `frontend/dist` as it is, and fails the build when `frontend/dist/index.html` is missing rather than producing a binary with an empty GUI. The release workflow builds the frontend in a job of its own and sets it in the jobs that compile the binaries.
 
 The four file writes are guarded with a content comparison and only write when the content has actually changed, so a re-build without a version bump leaves the tracked files clean.
 
@@ -220,7 +222,7 @@ The four file writes are guarded with a content comparison and only write when t
 **Trade-offs acknowledged:**
 - Builds dirty the working tree on a version bump: mitigated by the content guard and the `git status` reminder in `CLAUDE.md`.
 - Two concurrent `cargo build` invocations can race on these files: acceptable for a single-developer tool.
-- Read-only or sandboxed source checkouts: the four file writes demote their errors to `cargo:warning`, so they do not abort the build (only the version badge, the `package.json` / `package-lock.json` versions, the first of which feeds `__APP_VERSION__`, and the license list may be stale). The npm steps do abort it: `run_npm_with_env` panics when `npm ci` or `npm run build` fails, and both write under `frontend/`. Such a checkout needs `--no-default-features`, or `SKIP_FRONTEND_BUILD` with `node_modules` already installed (the variable skips only the Vite build, not `npm ci`).
+- Read-only or sandboxed source checkouts: the four file writes demote their errors to `cargo:warning`, so they do not abort the build (only the version badge, the `package.json` / `package-lock.json` versions, the first of which feeds `__APP_VERSION__`, and the license list may be stale). The npm steps do abort it: `run_npm_with_env` panics when `npm ci` or `npm run build` fails, and both write under `frontend/`. Such a checkout needs `--no-default-features`, or `SKIP_FRONTEND_BUILD` with a `frontend/dist` already built.
 
 **Alternative (not taken):** A CI check that *asserts* version sync rather than *performing* it, combined with a manual `cargo build` requirement before committing. This would be cleaner but requires extra CI infrastructure and more developer discipline. The current approach keeps the version fields in sync automatically at zero extra cost for the common case.
 
@@ -357,4 +359,25 @@ The four file writes are guarded with a content comparison and only write when t
 
 **Decision:** `frontend/.npmrc` sets `ignore-scripts=true`; `tests/npmrc.rs` fails if it goes missing.
 
-**Why:** `npm ci` runs inside the CI jobs that compile and upload the release binaries, and on the maintainer's machine. An install script of a compromised package would run there with access to both. The lockfile's only install script belongs to `fsevents` (optional, macOS-only), which ships a prebuilt binary. Explicit `npm run <script>` calls still run; only lifecycle scripts are skipped.
+**Why:** `npm ci` runs on the maintainer's machine and in CI. An install script of a compromised package would run there with access to the source, the build and the credentials around them. The lockfile's only install script belongs to `fsevents` (optional, macOS-only), which ships a prebuilt binary. Explicit `npm run <script>` calls still run; only lifecycle scripts are skipped.
+
+**And npm stays out of the binary jobs:** in the release workflow, a `frontend` job runs `npm ci`, the license generation, Vite and `svelte-check`, and uploads only `frontend/dist`. The jobs that compile, test and upload the binaries download that bundle and set `SKIP_FRONTEND_BUILD`, so no npm package code (install script, Vite plugin, build tool) executes where the binaries are built. A compromised build tool can still alter the GUI bundle it produces, but not the Rust build or the other artifacts.
+
+---
+
+## An empty SRC is not mirrored without confirmation
+
+**Decision:** The plan records `src_empty` when the SRC walk found nothing (after exclusions) while DST still holds entries. The CLI refuses a real run of such a plan with exit status 2 unless `--allow-empty-src` is passed; a dry run prints the same warning and exits normally. The GUI asks for confirmation, and `POST /run` refuses the plan without `allow_empty_src`. The engine itself is unchanged: `preview()` still plans deleting all of DST, so the guard sits where a run starts.
+
+**Why:** an unmounted drive or share leaves an empty, readable mount point. Unlike an unreadable SRC, it looks like a legitimately empty folder, and mirroring it deletes the whole backup, unattended runs included. The case where this is intended (clearing DST on purpose) is rare enough to ask for an explicit flag.
+
+**Not covered:** a SRC that is mostly but not entirely gone. A threshold on the share of DST a run deletes would catch that too, at the cost of a setting and false alarms on legitimate clean-ups.
+
+---
+
+## Special files are walk errors, not files
+
+**Decision:** The walker records a named pipe, socket or device file as a walk error and leaves it out of the plan.
+
+**Why:** opening a FIFO to hash or copy it blocks until a writer appears, which can be never, and a blocked read cannot be cancelled. As a walk error it is reported (exit status 1), never opened, and in SRC it shields its DST counterpart like any unreadable path.
+

@@ -54,6 +54,8 @@ export interface PlanSummary {
   total_bytes: number;
   total_ops: number;
   ops: OpEntry[];
+  /** SRC was empty while DST was not: running deletes everything in DST. */
+  src_empty: boolean;
 }
 
 export interface ProgressSnapshot {

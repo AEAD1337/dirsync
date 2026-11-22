@@ -27,6 +27,7 @@ fn bare_plan(dst_root: std::path::PathBuf, ops: Vec<SyncOp>) -> SyncPlan {
         hdd: false,
         dir_blocked_targets: vec![],
         walk_errors: vec![],
+        src_empty: false,
     }
 }
 

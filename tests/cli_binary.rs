@@ -413,3 +413,62 @@ fn a_run_into_a_dst_another_instance_uses_is_refused() {
     );
     assert!(dst.path().join("theirs.txt").exists());
 }
+
+// --- Empty SRC guard ---
+
+/// SRC exists but is empty (an unmounted mount point, a share that came
+/// back empty) while DST is not: a real run is refused with the usage status
+/// and DST stays untouched.
+#[test]
+fn an_empty_src_over_a_populated_dst_is_refused() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    write_file(dst.path(), "keep.txt", b"precious");
+
+    let out = run(&[src.path().to_str().unwrap(), dst.path().to_str().unwrap()]);
+
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--allow-empty-src"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(fs::read(dst.path().join("keep.txt")).unwrap(), b"precious");
+}
+
+#[test]
+fn allow_empty_src_mirrors_an_empty_src() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    write_file(dst.path(), "gone.txt", b"x");
+
+    let out = run(&[
+        src.path().to_str().unwrap(),
+        dst.path().to_str().unwrap(),
+        "--allow-empty-src",
+    ]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!dst.path().join("gone.txt").exists());
+}
+
+#[test]
+fn a_dry_run_of_an_empty_src_warns_and_succeeds() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    write_file(dst.path(), "keep.txt", b"x");
+
+    let out = run(&[
+        src.path().to_str().unwrap(),
+        dst.path().to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--allow-empty-src"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(dst.path().join("keep.txt").exists());
+}

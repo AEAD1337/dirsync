@@ -118,6 +118,11 @@ pub struct SyncPlan {
     /// GUI already received each one as a warning log entry during the walk.
     #[serde(skip)]
     pub walk_errors: Vec<crate::error::FileError>,
+    /// The SRC walk found nothing (after exclusions) while DST still holds
+    /// entries: running this plan deletes everything in DST. That is what an
+    /// unmounted drive or share looks like, so the CLI and the GUI refuse to
+    /// run it without explicit confirmation. Dry runs are not affected.
+    pub src_empty: bool,
 }
 
 impl SyncPlan {
@@ -570,6 +575,7 @@ pub fn plan(
         hdd,
         dir_blocked_targets,
         walk_errors: Vec::new(),
+        src_empty: false,
     };
     plan.recount();
     plan
@@ -627,6 +633,7 @@ mod tests {
             hdd: false,
             dir_blocked_targets: vec![],
             walk_errors: vec![],
+            src_empty: false,
         }
     }
 

@@ -526,3 +526,102 @@ async fn a_false_directory_rename_pairing_still_syncs_content() {
     // path, keeping AAAA under the new name for good.
     assert_eq!(read_file(dst.path(), "new/a.txt"), b"BBBB");
 }
+
+/// A FIFO planted in SRC and in DST must not hang the preview or the run
+/// (opening one to hash or copy it blocks until a writer appears). Both are
+/// reported, the SRC one shields its DST counterpart, and everything else
+/// is mirrored.
+#[cfg(unix)]
+#[tokio::test]
+async fn fifos_in_src_and_dst_do_not_hang_the_sync() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    fs::write(src.path().join("a.txt"), b"data").unwrap();
+    for pipe in [src.path().join("pipe"), dst.path().join("other_pipe")] {
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: mkfifo failed");
+            return;
+        }
+    }
+    // Same name and size as a SRC file but a different mtime: the case that
+    // would hash the DST side.
+    fs::write(src.path().join("empty"), b"").unwrap();
+    let dst_empty_pipe = dst.path().join("empty");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&dst_empty_pipe)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let engine = SyncEngine::new(
+        src.path().to_path_buf(),
+        dst.path().to_path_buf(),
+        Arc::new(AppConfig::default()),
+    );
+    let work = async {
+        let plan = engine.preview(None, None).await.unwrap();
+        let walk_errors = plan.walk_errors.len();
+        let (progress, _rx) = new_progress_channel();
+        let (_, pause_rx) = watch::channel(false);
+        let (_, cancel_rx) = watch::channel(false);
+        engine.run(plan, progress, false, pause_rx, cancel_rx).await;
+        walk_errors
+    };
+    let walk_errors = tokio::time::timeout(std::time::Duration::from_secs(20), work)
+        .await
+        .expect("preview or run hung on a FIFO");
+
+    assert_eq!(walk_errors, 3, "every FIFO is reported");
+    assert_eq!(fs::read(dst.path().join("a.txt")).unwrap(), b"data");
+}
+
+// --- Empty SRC guard (the plan only flags it; the CLI and GUI refuse) ---
+
+async fn preview_src_empty(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    config: AppConfig,
+) -> bool {
+    let engine = SyncEngine::new(src.to_path_buf(), dst.to_path_buf(), Arc::new(config));
+    engine.preview(None, None).await.unwrap().src_empty
+}
+
+/// An unmounted drive or share leaves an empty mount point: mirroring it
+/// would delete everything in DST. The plan says so, so the callers can
+/// refuse to run it without confirmation.
+#[tokio::test]
+async fn an_empty_src_over_a_populated_dst_is_flagged() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    fs::write(dst.path().join("keep.txt"), b"x").unwrap();
+
+    assert!(preview_src_empty(src.path(), dst.path(), AppConfig::default()).await);
+}
+
+#[tokio::test]
+async fn a_src_holding_only_excluded_entries_counts_as_empty() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    fs::write(src.path().join("scratch.tmp"), b"x").unwrap();
+    fs::write(dst.path().join("keep.txt"), b"x").unwrap();
+    let config = AppConfig {
+        exclude_patterns: vec!["*.tmp".into()],
+        ..AppConfig::default()
+    };
+
+    assert!(preview_src_empty(src.path(), dst.path(), config).await);
+}
+
+#[tokio::test]
+async fn a_populated_src_or_an_empty_dst_is_not_flagged() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    assert!(!preview_src_empty(src.path(), dst.path(), AppConfig::default()).await);
+
+    fs::write(src.path().join("a.txt"), b"x").unwrap();
+    fs::write(dst.path().join("b.txt"), b"x").unwrap();
+    assert!(!preview_src_empty(src.path(), dst.path(), AppConfig::default()).await);
+}

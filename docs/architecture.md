@@ -41,7 +41,7 @@ Before walking, `drive::probe(src, dst)` classifies both endpoints. The engine c
 
 ## Stage 1: Walk (`walker.rs`)
 
-Both trees are walked concurrently: the engine drives them with `tokio::join!` over two `spawn_blocking` tasks, unconditionally. Drive type never gates this: each walk reads exactly one endpoint, and SRC and DST are assumed to be separate devices, so the two can never contend for the same spindle. `WalkDir` traverses depth-first with `follow_links(false)`. Regular files and directories are recorded normally. Symlinks are preserved as-is: each symlink becomes a `FileEntry` with `symlink_target` set to the raw link target (not followed); symlinks to directories are not traversed into. For each entry the walker records:
+Both trees are walked concurrently: the engine drives them with `tokio::join!` over two `spawn_blocking` tasks, unconditionally. Drive type never gates this: each walk reads exactly one endpoint, and SRC and DST are assumed to be separate devices, so the two can never contend for the same spindle. `WalkDir` traverses depth-first with `follow_links(false)`. Regular files and directories are recorded normally. Any other file type (a named pipe, socket or device) is reported as a walk error and left out: opening a FIFO to hash or copy it would block until a writer appears, and like any unreadable SRC path it shields its DST counterpart. Symlinks are preserved as-is: each symlink becomes a `FileEntry` with `symlink_target` set to the raw link target (not followed); symlinks to directories are not traversed into. For each entry the walker records:
 
 - `rel_path`: path relative to the tree root, used as the identity key for matching
 - `abs_path`: used for all I/O
@@ -184,6 +184,8 @@ The 512 KB chunk size means two large files of the same size with identical head
 ```
 build.rs               - version sync (README badge, APP_VERSION); with `gui` also
                          frontend/package*.json, licenses_generated.ts, Vite build
+                         (none of the npm steps with SKIP_FRONTEND_BUILD: CI
+                         builds the bundle in its own job)
 frontend/              - Svelte 5 app (Vite, TypeScript); dist/ is embedded by gui/assets.rs
 src/
   lib.rs               - library root; declares the public modules (gui only with the `gui` feature)

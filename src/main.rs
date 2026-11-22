@@ -189,6 +189,24 @@ async fn real_main() -> Result<i32> {
     }
 
     let partial_or_ok = |failed: bool| if failed { cli::EXIT_PARTIAL } else { 0 };
+
+    // An empty SRC over a populated DST deletes all of DST, and is what an
+    // unmounted drive or share looks like. A dry run only warns; a real run
+    // needs --allow-empty-src. Checked before anything is executed.
+    if plan.src_empty {
+        let what = format!(
+            "\nSRC {} is empty but DST is not: mirroring it would delete everything in DST \
+             ({} item(s)). If SRC is an unmounted drive or share, mount it first.",
+            plan.src_root.display(),
+            plan.delete_count
+        );
+        if args.dry_run {
+            eprintln!("{what} A real run needs --allow-empty-src.");
+        } else if !args.allow_empty_src {
+            eprintln!("{what} Pass --allow-empty-src to mirror an empty SRC anyway.");
+            return Ok(cli::EXIT_USAGE);
+        }
+    }
     if plan.is_noop() {
         println!("Nothing to do.");
         return Ok(partial_or_ok(incomplete));

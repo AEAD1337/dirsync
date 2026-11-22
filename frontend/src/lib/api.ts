@@ -61,8 +61,10 @@ export const api = {
 
   // src/dst are echoed so the server can reject a run whose stored plan no
   // longer matches what the user is looking at.
-  run: (dry_run: boolean, skip_prefixes: string[], src: string, dst: string) =>
-    requestVoid('POST', '/run', { dry_run, skip_prefixes, src, dst }),
+  // allow_empty_src: the user confirmed running a plan whose SRC was empty
+  // (it deletes everything in DST); the server refuses such a run without it.
+  run: (dry_run: boolean, skip_prefixes: string[], src: string, dst: string, allow_empty_src = false) =>
+    requestVoid('POST', '/run', { dry_run, skip_prefixes, src, dst, allow_empty_src }),
   // Toggles; the answer is the pause state the server now holds.
   pause: () => request<{ paused: boolean }>('POST', '/pause'),
   cancel: () => requestVoid('POST', '/cancel'),

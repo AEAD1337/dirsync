@@ -412,3 +412,39 @@ fn walk_aborts_when_the_token_flips_mid_walk() {
     }
     panic!("a token flipped mid-walk never aborted the walk");
 }
+
+/// Make a named pipe, or `None` (and the caller skips) where mkfifo is
+/// unavailable.
+#[cfg(unix)]
+fn mkfifo(path: &Path) -> Option<()> {
+    let ok = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .ok()?
+        .success();
+    if !ok {
+        eprintln!("skipped: mkfifo failed");
+        return None;
+    }
+    Some(())
+}
+
+/// A named pipe, socket or device is not a file dirsync can mirror: opening
+/// a FIFO to hash or copy it blocks until a writer appears, which can be
+/// never. The walk reports it and leaves it out, instead of passing it on
+/// as a regular file.
+#[cfg(unix)]
+#[test]
+fn walk_reports_a_fifo_instead_of_listing_it_as_a_file() {
+    let dir = TempDir::new().unwrap();
+    write_file(dir.path(), "a.txt", b"x");
+    if mkfifo(&dir.path().join("pipe")).is_none() {
+        return;
+    }
+
+    let walked = walk(dir.path(), &no_excludes(), "src", None, &not_cancelled()).unwrap();
+
+    assert_eq!(rel_paths(&walked.entries), ["a.txt"]);
+    assert_eq!(walked.errors.len(), 1, "{:?}", walked.errors.len());
+    assert_eq!(walked.errors[0].rel_path, Path::new("pipe"));
+}

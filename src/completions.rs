@@ -51,7 +51,7 @@ _dirsync() {
     esac
 
     if [[ "$cur" == -* ]]; then
-        local opts="-n --dry-run -e --exclude --gui --port --config --yolo -V --version -h --help"
+        local opts="-n --dry-run -e --exclude --gui --port --config --yolo --allow-empty-src -V --version -h --help"
         COMPREPLY=($(compgen -W "$opts" -- "$cur"))
         return
     fi
@@ -79,7 +79,7 @@ _dirsync() {
         '--gui[Launch the web GUI]' \
         '--port[Override GUI server port]:port' \
         '--config[Path to config file]:config file:_files' \
-        '--yolo[Disable system-critical path checks]' \
+        '--yolo[Disable system-critical path checks]'         '--allow-empty-src[Mirror an empty SRC over a non-empty DST]' \
         '(-V --version)'{-V,--version}'[Print version and exit]' \
         '(-h --help)'{-h,--help}'[Print help and exit]' \
         '1:src or subcommand:->first' \
@@ -113,6 +113,7 @@ complete -c dirsync -n '__fish_use_subcommand' -l gui -d 'Launch the web GUI'
 complete -c dirsync -n '__fish_use_subcommand' -l port -r -d 'Override GUI server port'
 complete -c dirsync -n '__fish_use_subcommand' -l config -r -a '(__fish_complete_path)' -d 'Path to config file'
 complete -c dirsync -n '__fish_use_subcommand' -l yolo -d 'Disable system-critical path checks'
+complete -c dirsync -n '__fish_use_subcommand' -l allow-empty-src -d 'Mirror an empty SRC over a non-empty DST'
 complete -c dirsync -n '__fish_use_subcommand' -s V -l version -d 'Print version and exit'
 complete -c dirsync -n '__fish_use_subcommand' -s h -l help -d 'Print help and exit'
 
@@ -150,6 +151,7 @@ Register-ArgumentCompleter -Native -CommandName dirsync -ScriptBlock {
             @('--port',     '--port',     'Override GUI server port'),
             @('--config',   '--config',   'Path to config file'),
             @('--yolo',     '--yolo',     'Disable system-critical path checks'),
+            @('--allow-empty-src', '--allow-empty-src', 'Mirror an empty SRC over a non-empty DST'),
             @('--version',  '--version',  'Print version and exit'),
             @('-V',         '-V',         'Print version and exit'),
             @('--help',     '--help',     'Print help and exit'),
@@ -229,7 +231,14 @@ mod tests {
         // fish spells long options without the leading dashes (`-l dry-run`),
         // so the shared assertion uses the bare option name.
         for script in [BASH, ZSH, FISH, POWERSHELL] {
-            for flag in ["dry-run", "exclude", "gui", "port", "yolo"] {
+            for flag in [
+                "dry-run",
+                "exclude",
+                "gui",
+                "port",
+                "yolo",
+                "allow-empty-src",
+            ] {
                 assert!(script.contains(flag), "{flag} missing from a script");
             }
         }

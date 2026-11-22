@@ -80,6 +80,7 @@ Options:
   -n, --dry-run              Analyse only, make no changes
   -e, --exclude <PATTERN>    Exclude files/dirs matching glob (repeatable)
       --yolo                 Disable system-critical path checks
+      --allow-empty-src      Mirror an empty SRC over a non-empty DST
       --config <PATH>        Path to config file
       --port <PORT>          Override GUI server port (1024-65535)
       --gui                  Launch the web GUI
@@ -97,7 +98,8 @@ path: `*.tmp` and `node_modules` work, `build/temp` never matches.
 Exit status: `0` success, nothing to do, or dry run; `1` finished, but one or
 more files failed or paths could not be read (listed on stderr); `2` usage
 error (bad flags, missing or invalid SRC/DST, a `--config` file that cannot be
-loaded, folders in use by another running dirsync); `3` fatal error, the sync could not be planned or started; `130`
+loaded, folders in use by another running dirsync, an empty SRC over a
+non-empty DST without `--allow-empty-src`); `3` fatal error, the sync could not be planned or started; `130`
 cancelled with Ctrl-C.
 
 **Safety checks**
@@ -111,6 +113,15 @@ Both the CLI and the GUI refuse a sync when:
 - either endpoint is, is inside, or contains a system-critical directory
   (`C:\Windows`, `C:\Program Files`, `C:\Users` as a whole, `/etc`, `/boot`,
   `/usr`, ...), pass `--yolo` to override
+
+An empty SRC over a non-empty DST, which is what an unmounted drive or share
+looks like, would delete everything in DST. The CLI refuses that run with exit
+status `2` unless `--allow-empty-src` is passed (a dry run only warns), and the
+GUI asks for confirmation before running it.
+
+A named pipe, socket or device file in SRC or DST is skipped and listed like
+an unreadable path, instead of being opened as a file (a pipe would block
+the sync until something writes to it).
 
 A directory in SRC that cannot be read (permissions, a network share that
 dropped out) is never treated as empty: nothing below its counterpart in DST

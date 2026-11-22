@@ -22,6 +22,7 @@ pub struct Args {
     pub port: Option<u16>,
     pub config: Option<PathBuf>,
     pub yolo: bool,
+    pub allow_empty_src: bool,
 }
 
 const HELP: &str = "\
@@ -39,6 +40,8 @@ OPTIONS:
         --port <PORT>       Override GUI server port (1024-65535)
         --config <PATH>     Path to config file
         --yolo              Disable system-critical path checks
+        --allow-empty-src   Mirror an empty SRC over a non-empty DST
+                            (deletes everything in DST)
     -V, --version           Print version and exit
     -h, --help              Print this help and exit
 
@@ -55,7 +58,8 @@ EXIT STATUS:
     0    Success, nothing to do, or dry run
     1    Finished, but files failed or paths could not be read (see stderr)
     2    Usage error: bad flags, missing or invalid SRC/DST, unreadable --config,
-         or folders in use by another running dirsync
+         folders in use by another running dirsync, or an empty SRC over a
+         non-empty DST without --allow-empty-src
     3    Fatal error: the sync could not be planned or started
     130  Cancelled with Ctrl-C
 ";
@@ -112,6 +116,7 @@ fn parse_from(mut parser: lexopt::Parser) -> Args {
         port: None,
         config: None,
         yolo: false,
+        allow_empty_src: false,
     };
 
     loop {
@@ -142,6 +147,7 @@ fn parse_from(mut parser: lexopt::Parser) -> Args {
             }
             Long("gui") => args.gui = true,
             Long("yolo") => args.yolo = true,
+            Long("allow-empty-src") => args.allow_empty_src = true,
             Long("port") => {
                 let val = parser.value().unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
@@ -293,6 +299,12 @@ mod tests {
     }
 
     #[test]
+    fn test_allow_empty_src_flag() {
+        assert!(parse_args(&["s", "d", "--allow-empty-src"]).allow_empty_src);
+        assert!(!parse_args(&["s", "d"]).allow_empty_src);
+    }
+
+    #[test]
     fn test_gui_and_yolo_flags() {
         let args = parse_args(&["--gui", "--yolo"]);
         assert!(args.gui);
@@ -341,6 +353,7 @@ mod tests {
             "--port",
             "--config",
             "--yolo",
+            "--allow-empty-src",
             "--version",
             "--help",
         ] {
