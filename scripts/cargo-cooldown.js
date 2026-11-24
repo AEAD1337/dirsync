@@ -7,8 +7,10 @@
 // is left, because holding one crate back can change what the others resolve
 // to.
 //
-// Fails closed: if a lookup fails or a young crate cannot be held back, the
-// original Cargo.lock is restored and the script exits non-zero.
+// Fails closed: if a lookup fails, a young crate cannot be held back, or the
+// update brings in a package from outside crates.io (git, another registry:
+// nothing to date it by), the original Cargo.lock is restored and the script
+// exits non-zero.
 //
 // Usage: node scripts/cargo-cooldown.js [--days N]
 // No npm dependencies: pure Node.js (18+ for fetch).
@@ -23,17 +25,35 @@ const LOCK = path.join(ROOT, 'Cargo.lock');
 const UA = 'dirsync-make-update (https://github.com/AEAD1337/dirsync)';
 const MAX_ROUNDS = 5;
 
+// The exact source ids Cargo writes for crates.io (the git index id, which
+// Cargo also records for the sparse protocol, and the sparse id itself).
+// Compared whole: a substring test would take `git+https://evil.example/crates.io`
+// or `registry+https://crates.io.evil.example/` for crates.io.
+const CRATES_IO = new Set([
+  'registry+https://github.com/rust-lang/crates.io-index',
+  'sparse+https://index.crates.io/',
+]);
+
+// versions: name -> Set(version) for crates.io packages, the only ones whose
+// age can be looked up. foreign: "name@version (source)" for every package
+// from anywhere else (git, another registry), which no age gate covers.
 function readLock(text) {
-  const versions = new Map(); // name -> Set(version), crates.io packages only
+  const versions = new Map();
+  const foreign = new Set();
   for (const block of text.split('[[package]]').slice(1)) {
     const name = /^name = "([^"]+)"/m.exec(block);
     const version = /^version = "([^"]+)"/m.exec(block);
     const source = /^source = "([^"]+)"/m.exec(block);
-    if (!name || !version || !source || !source[1].includes('crates.io')) continue;
+    // No source: a workspace member, built from this repository.
+    if (!name || !version || !source) continue;
+    if (!CRATES_IO.has(source[1])) {
+      foreign.add(`${name[1]}@${version[1]} (${source[1]})`);
+      continue;
+    }
     if (!versions.has(name[1])) versions.set(name[1], new Set());
     versions.get(name[1]).add(version[1]);
   }
-  return versions;
+  return { versions, foreign };
 }
 
 function numeric(v) {
@@ -76,7 +96,7 @@ function cargo(args) {
 
 async function main() {
   const original = fs.readFileSync(LOCK, 'utf8');
-  const before = readLock(original);
+  const { versions: before, foreign: foreignBefore } = readLock(original);
   const restore = (why) => {
     fs.writeFileSync(LOCK, original);
     console.error(`cargo-cooldown: ${why}\nCargo.lock restored to its state before the update.`);
@@ -85,10 +105,17 @@ async function main() {
 
   cargo(['update']);
 
+  // A package from anywhere but crates.io has no publish date to check, so
+  // the cooldown cannot vouch for it: fail closed instead of letting it by.
+  const newForeign = [...readLock(fs.readFileSync(LOCK, 'utf8')).foreign].filter((f) => !foreignBefore.has(f));
+  if (newForeign.length > 0) {
+    restore(`the update brought in packages from outside crates.io, which the cooldown cannot date: ${newForeign.join(', ')}`);
+  }
+
   const ages = new Map(); // "name@version" -> Date
   const cutoff = Date.now() - DAYS * 86400 * 1000;
   for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const changes = moved(before, readLock(fs.readFileSync(LOCK, 'utf8')));
+    const changes = moved(before, readLock(fs.readFileSync(LOCK, 'utf8')).versions);
     const young = [];
     for (const c of changes) {
       const key = `${c.name}@${c.version}`;
@@ -113,7 +140,7 @@ async function main() {
       // jiff pins jiff-static exactly, so holding jiff back takes jiff-static
       // with it. `cargo update -p` would then name a version that is gone;
       // the next round re-checks whatever the crate resolved to instead.
-      if (!readLock(fs.readFileSync(LOCK, 'utf8')).get(c.name)?.has(c.version)) continue;
+      if (!readLock(fs.readFileSync(LOCK, 'utf8')).versions.get(c.name)?.has(c.version)) continue;
       const published = ages.get(`${c.name}@${c.version}`);
       const eligible = new Date(published.getTime() + DAYS * 86400 * 1000).toISOString().slice(0, 10);
       // The newest version the lockfile had before that is older than this one.
@@ -132,7 +159,11 @@ async function main() {
   restore(`still finding young versions after ${MAX_ROUNDS} rounds`);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+} else {
+  module.exports = { readLock };
+}
