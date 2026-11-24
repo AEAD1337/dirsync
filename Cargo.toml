@@ -30,7 +30,7 @@ dirs = "7"
 # CLI
 lexopt = "0.3"
 indicatif = { version = "0.18", features = ["tokio"] }
-jiff = "0.2.43"
+jiff = "1.0.3"
 
 # GUI (optional)
 axum = { version = "0.8", features = ["ws"], optional = true }

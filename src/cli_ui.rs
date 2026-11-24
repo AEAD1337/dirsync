@@ -240,7 +240,7 @@ impl CliUi {
         let elapsed_str = format_duration(elapsed);
         let remaining_str = eta.map(format_duration).unwrap_or_else(|| "-".into());
         let eta_str = if let Some(secs) = eta {
-            let now = jiff::Zoned::now();
+            let now = jiff::ZonedDateTime::now();
             let secs = i64::try_from(secs).unwrap_or(i64::MAX);
             let arrival = now.saturating_add(jiff::SignedDuration::from_secs(secs));
             if arrival.date() == now.date() {
