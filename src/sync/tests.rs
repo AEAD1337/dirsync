@@ -4,7 +4,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use filetime::{FileTime, set_file_mtime};
 use tempfile::TempDir;
 
 use crate::config::AppConfig;
@@ -28,19 +27,24 @@ fn write_file(path: &Path, content: &[u8]) {
     fs::write(path, content).unwrap();
 }
 
+/// Set `path`'s modification time.
+fn set_file_mtime(path: impl AsRef<Path>, mtime: SystemTime) -> std::io::Result<()> {
+    fs::set_times(path, fs::FileTimes::new().set_modified(mtime))
+}
+
 /// Bump the mtime of `path` by +4 s so the fast-path (mtime equality) detects a change.
 fn touch_newer(path: &Path) {
     let meta = fs::metadata(path).unwrap();
     let mtime = meta.modified().unwrap();
     let newer = mtime + Duration::from_secs(4);
-    set_file_mtime(path, FileTime::from_system_time(newer)).unwrap();
+    set_file_mtime(path, newer).unwrap();
 }
 
 /// Set the mtime of `path` to 10 seconds in the past so the matcher is forced
 /// to hash the file rather than declaring it Identical via mtime alone.
 fn set_mtime_to_past(path: &Path) {
     let past = SystemTime::now() - Duration::from_secs(10);
-    set_file_mtime(path, FileTime::from_system_time(past)).unwrap();
+    set_file_mtime(path, past).unwrap();
 }
 
 /// Execute `plan` and return the skip log, whatever it holds.
@@ -648,7 +652,7 @@ async fn test_mtime_within_tolerance_is_identical() {
 
     // 1 s difference: inside the 3 s tolerance window → Identical without hashing.
     let past = SystemTime::now() - Duration::from_secs(1);
-    set_file_mtime(dst.join("file.txt"), FileTime::from_system_time(past)).unwrap();
+    set_file_mtime(dst.join("file.txt"), past).unwrap();
 
     let cfg = default_config();
     let engine = SyncEngine::new(src.clone(), dst.clone(), cfg);
@@ -678,7 +682,7 @@ async fn test_mtime_outside_tolerance_same_content_emits_touch() {
     // 5 s difference: outside the 3 s tolerance → must hash both, confirm
     // content is identical, and emit a TouchMtime op (not an overwrite).
     let past = SystemTime::now() - Duration::from_secs(5);
-    set_file_mtime(dst.join("file.txt"), FileTime::from_system_time(past)).unwrap();
+    set_file_mtime(dst.join("file.txt"), past).unwrap();
 
     let cfg = default_config();
     let engine = SyncEngine::new(src.clone(), dst.clone(), cfg);
@@ -705,7 +709,7 @@ async fn test_mtime_diverged_touch_corrects_dst_mtime() {
 
     // Push DST mtime 10 s into the past: well outside tolerance.
     let past = SystemTime::now() - Duration::from_secs(10);
-    set_file_mtime(dst.join("file.txt"), FileTime::from_system_time(past)).unwrap();
+    set_file_mtime(dst.join("file.txt"), past).unwrap();
 
     run_sync(&src, &dst).await;
 

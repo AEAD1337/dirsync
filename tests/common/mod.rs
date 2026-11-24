@@ -94,3 +94,9 @@ pub fn assert_privilege_error(message: &str, code: Option<i32>) {
         "expected the missing-privilege error (os error {WINDOWS_PRIVILEGE_NOT_HELD}), got: {message}"
     );
 }
+
+/// Set `path`'s modification time (what the `filetime` crate did before
+/// `std::fs::set_times` covered it).
+pub fn set_file_mtime(path: impl AsRef<Path>, mtime: std::time::SystemTime) -> std::io::Result<()> {
+    std::fs::set_times(path, std::fs::FileTimes::new().set_modified(mtime))
+}

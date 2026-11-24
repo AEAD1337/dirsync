@@ -51,7 +51,6 @@ winresource = "0.1"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-filetime = "0.2"
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(windows)'.dependencies]

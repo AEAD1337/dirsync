@@ -125,8 +125,8 @@ async fn test_dst_only_files_deleted() {
 
     // Sync mtime on keep.txt so it's Identical.
     let src_meta = fs::metadata(src.path().join("keep.txt")).unwrap();
-    let mtime = filetime::FileTime::from_system_time(src_meta.modified().unwrap());
-    filetime::set_file_mtime(dst.path().join("keep.txt"), mtime).ok();
+    let mtime = src_meta.modified().unwrap();
+    common::set_file_mtime(dst.path().join("keep.txt"), mtime).ok();
 
     let config = Arc::new(AppConfig::default());
     let engine = SyncEngine::new(src.path().to_path_buf(), dst.path().to_path_buf(), config);
@@ -160,8 +160,8 @@ async fn test_identical_file_skipped() {
     let src_path = src.path().join("same.txt");
     let dst_path = dst.path().join("same.txt");
     let src_meta = fs::metadata(&src_path).unwrap();
-    let mtime = filetime::FileTime::from_system_time(src_meta.modified().unwrap());
-    filetime::set_file_mtime(&dst_path, mtime).ok();
+    let mtime = src_meta.modified().unwrap();
+    common::set_file_mtime(&dst_path, mtime).ok();
 
     let config = Arc::new(AppConfig::default());
     let engine = SyncEngine::new(src.path().to_path_buf(), dst.path().to_path_buf(), config);
@@ -181,13 +181,11 @@ async fn test_identical_files_untouched() {
         let content = format!("content of {name}");
         write_file(src.path(), name, content.as_bytes());
         write_file(dst.path(), name, content.as_bytes());
-        let mtime = filetime::FileTime::from_system_time(
-            fs::metadata(src.path().join(name))
-                .unwrap()
-                .modified()
-                .unwrap(),
-        );
-        filetime::set_file_mtime(dst.path().join(name), mtime).ok();
+        let mtime = fs::metadata(src.path().join(name))
+            .unwrap()
+            .modified()
+            .unwrap();
+        common::set_file_mtime(dst.path().join(name), mtime).ok();
     }
 
     let config = Arc::new(AppConfig::default());
@@ -491,7 +489,7 @@ async fn a_src_junction_is_mirrored_as_a_junction_without_privileges() {
 
 fn set_mtime(dir: &std::path::Path, rel: &str, secs_ago: u64) {
     let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
-    filetime::set_file_mtime(dir.join(rel), filetime::FileTime::from_system_time(t)).unwrap();
+    common::set_file_mtime(dir.join(rel), t).unwrap();
 }
 
 #[tokio::test]

@@ -727,8 +727,8 @@ async fn test_touch_mtime_copies_the_source_timestamp() {
     fs::write(&dst_file, b"same").unwrap();
 
     // Backdate SRC so the two mtimes cannot coincide by accident.
-    let target = filetime::FileTime::from_unix_time(1_000_000_000, 0);
-    filetime::set_file_mtime(&src_file, target).unwrap();
+    let target = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    common::set_file_mtime(&src_file, target).unwrap();
 
     let plan = bare_plan(
         dst.path().to_path_buf(),
@@ -1144,7 +1144,7 @@ async fn touch_mtime_updates_a_readonly_dst_file_and_keeps_it_readonly() {
     fs::write(&s, b"same").unwrap();
     fs::write(&d, b"same").unwrap();
     let past = std::time::SystemTime::now() - Duration::from_secs(3600);
-    filetime::set_file_mtime(&s, filetime::FileTime::from_system_time(past)).unwrap();
+    common::set_file_mtime(&s, past).unwrap();
     set_readonly(&d, true);
 
     let plan = bare_plan(
@@ -1356,9 +1356,9 @@ async fn a_dry_run_of_every_op_kind_leaves_dst_unchanged() {
         fs::write(s.join("ow_small.txt"), b"SRC version").unwrap();
         fs::write(s.join("ow_large.bin"), large_payload(2)).unwrap();
         fs::write(s.join("touch.txt"), b"same").unwrap();
-        filetime::set_file_mtime(
+        common::set_file_mtime(
             s.join("touch.txt"),
-            filetime::FileTime::from_unix_time(1_000_000_000, 0),
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000),
         )
         .unwrap();
         fs::write(s.join("blocker"), b"a file where DST has a directory").unwrap();
@@ -1479,7 +1479,7 @@ async fn a_failed_overwrite_keeps_the_old_dst_content() {
             fs::write(&d, vec![2u8; size]).unwrap();
             // Same size: an old DST mtime forces the content comparison.
             let past = std::time::SystemTime::now() - Duration::from_secs(3600);
-            filetime::set_file_mtime(&d, filetime::FileTime::from_system_time(past)).unwrap();
+            common::set_file_mtime(&d, past).unwrap();
 
             let engine = SyncEngine::new(
                 src.path().to_path_buf(),
@@ -1617,7 +1617,7 @@ async fn touch_mtime_works_while_another_program_holds_the_file_open() {
     fs::write(&s, b"same").unwrap();
     fs::write(&d, b"same").unwrap();
     let past = std::time::SystemTime::now() - Duration::from_secs(3600);
-    filetime::set_file_mtime(&s, filetime::FileTime::from_system_time(past)).unwrap();
+    common::set_file_mtime(&s, past).unwrap();
     // A viewer or indexer that opened the file sharing only reads: opening
     // it for full write access, as a metadata write used to, fails with a
     // sharing violation (os error 32).
